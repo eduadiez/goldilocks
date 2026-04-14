@@ -5,7 +5,11 @@ test
 bench
 testsgpu
 testscpu
+testcpu
 benchcpu
 benchgpu
 deviceQuery
 *.o
+
+# Editor / tooling artifacts
+.claude/

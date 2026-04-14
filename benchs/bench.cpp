@@ -3,10 +3,15 @@
 
 #include "../src/goldilocks_base_field.hpp"
 #include "../src/poseidon_goldilocks.hpp"
+#ifdef GOLDILOCKS_HAS_AVX2
 #include "../src/poseidon_goldilocks_avx.hpp"
+#endif // GOLDILOCKS_HAS_AVX2
 #include "../src/ntt_goldilocks.hpp"
 #include "../src/merklehash_goldilocks.hpp"
+#include "../src/platform.hpp"
+#ifdef GOLDILOCKS_ARCH_X86_64
 #include <immintrin.h>
+#endif
 
 #include <math.h> /* ceil */
 #include "omp.h"
@@ -60,6 +65,7 @@ static void POSEIDON_BENCH_FULL(benchmark::State &state)
     state.counters["Rate"] = benchmark::Counter(threads_core * (double)NUM_HASHES / (double)state.range(0), benchmark::Counter::kIsIterationInvariantRate | benchmark::Counter::kInvert);
     state.counters["BytesProcessed"] = benchmark::Counter(input_size * sizeof(uint64_t), benchmark::Counter::kIsIterationInvariantRate, benchmark::Counter::OneK::kIs1024);
 }
+#ifdef GOLDILOCKS_HAS_AVX2
 static void POSEIDON_BENCH_FULL_AVX(benchmark::State &state)
 {
     uint64_t input_size = (uint64_t)NUM_HASHES * (uint64_t)SPONGE_WIDTH;
@@ -97,6 +103,7 @@ static void POSEIDON_BENCH_FULL_AVX(benchmark::State &state)
     state.counters["Rate"] = benchmark::Counter(threads_core * (double)NUM_HASHES / (double)state.range(0), benchmark::Counter::kIsIterationInvariantRate | benchmark::Counter::kInvert);
     state.counters["BytesProcessed"] = benchmark::Counter(input_size * sizeof(uint64_t), benchmark::Counter::kIsIterationInvariantRate, benchmark::Counter::OneK::kIs1024);
 }
+#endif // GOLDILOCKS_HAS_AVX2
 #ifdef __AVX512__
 static void POSEIDON_BENCH_FULL_AVX512(benchmark::State &state)
 {
@@ -185,6 +192,7 @@ static void POSEIDON_BENCH(benchmark::State &state)
     state.counters["Rate"] = benchmark::Counter(threads_core * (double)NUM_HASHES / (double)state.range(0), benchmark::Counter::kIsIterationInvariantRate | benchmark::Counter::kInvert);
     state.counters["BytesProcessed"] = benchmark::Counter(input_size * sizeof(uint64_t), benchmark::Counter::kIsIterationInvariantRate, benchmark::Counter::OneK::kIs1024);
 }
+#ifdef GOLDILOCKS_HAS_AVX2
 static void POSEIDON_BENCH_AVX(benchmark::State &state)
 {
     uint64_t input_size = (uint64_t)NUM_HASHES * (uint64_t)SPONGE_WIDTH;
@@ -224,6 +232,7 @@ static void POSEIDON_BENCH_AVX(benchmark::State &state)
     state.counters["Rate"] = benchmark::Counter(threads_core * (double)NUM_HASHES / (double)state.range(0), benchmark::Counter::kIsIterationInvariantRate | benchmark::Counter::kInvert);
     state.counters["BytesProcessed"] = benchmark::Counter(input_size * sizeof(uint64_t), benchmark::Counter::kIsIterationInvariantRate, benchmark::Counter::OneK::kIs1024);
 }
+#endif // GOLDILOCKS_HAS_AVX2
 #ifdef __AVX512__
 static void POSEIDON_BENCH_AVX512(benchmark::State &state)
 {
@@ -316,6 +325,7 @@ static void LINEAR_HASH_BENCH(benchmark::State &state)
     delete[] cols;
     delete[] result;
 }
+#ifdef GOLDILOCKS_HAS_AVX2
 static void LINEAR_HASH_BENCH_AVX(benchmark::State &state)
 {
     Goldilocks::Element *cols = new Goldilocks::Element[(uint64_t)NCOLS_HASH * (uint64_t)NROWS_HASH];
@@ -358,6 +368,7 @@ static void LINEAR_HASH_BENCH_AVX(benchmark::State &state)
     delete[] cols;
     delete[] result;
 }
+#endif // GOLDILOCKS_HAS_AVX2
 #ifdef __AVX512__
 static void LINEAR_HASH_BENCH_AVX512(benchmark::State &state)
 {
@@ -450,6 +461,7 @@ static void MERKLETREE_BENCH(benchmark::State &state)
     delete[] cols;
     delete[] tree;
 }
+#ifdef GOLDILOCKS_HAS_AVX2
 static void MERKLETREE_BENCH_AVX(benchmark::State &state)
 {
     Goldilocks::Element *cols = new Goldilocks::Element[(uint64_t)NCOLS_HASH * (uint64_t)NROWS_HASH];
@@ -497,6 +509,7 @@ static void MERKLETREE_BENCH_AVX(benchmark::State &state)
     delete[] cols;
     delete[] tree;
 }
+#endif // GOLDILOCKS_HAS_AVX2
 #ifdef __AVX512__
 static void MERKLETREE_BENCH_AVX512(benchmark::State &state)
 {
@@ -594,6 +607,7 @@ static void MERKLETREE_BATCH_BENCH(benchmark::State &state)
     delete[] cols;
     delete[] tree;
 }
+#ifdef GOLDILOCKS_HAS_AVX2
 static void MERKLETREE_BATCH_BENCH_AVX(benchmark::State &state)
 {
     Goldilocks::Element *cols = new Goldilocks::Element[(uint64_t)NCOLS_HASH * (uint64_t)NROWS_HASH];
@@ -641,6 +655,7 @@ static void MERKLETREE_BATCH_BENCH_AVX(benchmark::State &state)
     delete[] cols;
     delete[] tree;
 }
+#endif // GOLDILOCKS_HAS_AVX2
 #ifdef __AVX512__
 static void MERKLETREE_BATCH_BENCH_AVX512(benchmark::State &state)
 {
@@ -968,10 +983,12 @@ BENCHMARK(POSEIDON_BENCH_FULL)
     ->DenseRange(omp_get_max_threads() / 2, omp_get_max_threads(), omp_get_max_threads() / 2)
     ->UseRealTime();
 
+#ifdef GOLDILOCKS_HAS_AVX2
 BENCHMARK(POSEIDON_BENCH_FULL_AVX)
     ->Unit(benchmark::kMicrosecond)
     ->DenseRange(omp_get_max_threads() / 2, omp_get_max_threads(), omp_get_max_threads() / 2)
     ->UseRealTime();
+#endif // GOLDILOCKS_HAS_AVX2
 
 #ifdef __AVX512__
 BENCHMARK(POSEIDON_BENCH_FULL_AVX512)
@@ -985,10 +1002,12 @@ BENCHMARK(POSEIDON_BENCH)
     ->DenseRange(omp_get_max_threads() / 2, omp_get_max_threads(), omp_get_max_threads() / 2)
     ->UseRealTime();
 
+#ifdef GOLDILOCKS_HAS_AVX2
 BENCHMARK(POSEIDON_BENCH_AVX)
     ->Unit(benchmark::kMicrosecond)
     ->DenseRange(omp_get_max_threads() / 2, omp_get_max_threads(), omp_get_max_threads() / 2)
     ->UseRealTime();
+#endif // GOLDILOCKS_HAS_AVX2
 
 #ifdef __AVX512__
 BENCHMARK(POSEIDON_BENCH_AVX512)
@@ -1002,10 +1021,12 @@ BENCHMARK(LINEAR_HASH_BENCH)
     ->DenseRange(omp_get_max_threads() / 2, omp_get_max_threads(), omp_get_max_threads() / 2)
     ->UseRealTime();
 
+#ifdef GOLDILOCKS_HAS_AVX2
 BENCHMARK(LINEAR_HASH_BENCH_AVX)
     ->Unit(benchmark::kMicrosecond)
     ->DenseRange(omp_get_max_threads() / 2, omp_get_max_threads(), omp_get_max_threads() / 2)
     ->UseRealTime();
+#endif // GOLDILOCKS_HAS_AVX2
 
 #ifdef __AVX512__
 BENCHMARK(LINEAR_HASH_BENCH_AVX512)
@@ -1019,10 +1040,12 @@ BENCHMARK(MERKLETREE_BENCH)
     ->DenseRange(omp_get_max_threads() / 2, omp_get_max_threads(), omp_get_max_threads() / 2)
     ->UseRealTime();
 
+#ifdef GOLDILOCKS_HAS_AVX2
 BENCHMARK(MERKLETREE_BENCH_AVX)
     ->Unit(benchmark::kMicrosecond)
     ->DenseRange(omp_get_max_threads() / 2, omp_get_max_threads(), omp_get_max_threads() / 2)
     ->UseRealTime();
+#endif // GOLDILOCKS_HAS_AVX2
 
 #ifdef __AVX512__
 BENCHMARK(MERKLETREE_BENCH_AVX512)
@@ -1036,10 +1059,12 @@ BENCHMARK(MERKLETREE_BATCH_BENCH)
     ->DenseRange(omp_get_max_threads() / 2, omp_get_max_threads(), omp_get_max_threads() / 2)
     ->UseRealTime();
 
+#ifdef GOLDILOCKS_HAS_AVX2
 BENCHMARK(MERKLETREE_BATCH_BENCH_AVX)
     ->Unit(benchmark::kMicrosecond)
     ->DenseRange(omp_get_max_threads() / 2, omp_get_max_threads(), omp_get_max_threads() / 2)
     ->UseRealTime();
+#endif // GOLDILOCKS_HAS_AVX2
 
 #ifdef __AVX512__
 BENCHMARK(MERKLETREE_BATCH_BENCH_AVX512)

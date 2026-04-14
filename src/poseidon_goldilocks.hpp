@@ -3,7 +3,9 @@
 
 #include "poseidon_goldilocks_constants.hpp"
 #include "goldilocks_base_field.hpp"
+#ifdef GOLDILOCKS_ARCH_X86_64
 #include <immintrin.h>
+#endif
 
 #define RATE 8
 #define CAPACITY 4
@@ -26,10 +28,12 @@ private:
     inline Goldilocks::Element static dot_(Goldilocks::Element *x, const Goldilocks::Element C[SPONGE_WIDTH]);
     inline void static prod_(Goldilocks::Element *x, const Goldilocks::Element alpha, const Goldilocks::Element C[SPONGE_WIDTH]);
 
+#ifdef GOLDILOCKS_HAS_AVX2
     inline void static add_avx(__m256i &st0, __m256i &st1, __m256i &st2, const Goldilocks::Element C[SPONGE_WIDTH]);
     inline void static pow7_avx(__m256i &st0, __m256i &st1, __m256i &st2);
     inline void static add_avx_a(__m256i &st0, __m256i &st1, __m256i &st2, const Goldilocks::Element C[SPONGE_WIDTH]);
     inline void static add_avx_small(__m256i &st0, __m256i &st1, __m256i &st2, const Goldilocks::Element C[SPONGE_WIDTH]);
+#endif // GOLDILOCKS_HAS_AVX2
 
 #ifdef __AVX512__
     inline void static pow7_avx512(__m512i &st0, __m512i &st1, __m512i &st2);
@@ -53,11 +57,13 @@ public:
     // Vectorized AVX:
     // Note, the functions that do not have the _avx suffix are the default ones to
     // be used in the prover, they implement avx vectorixation though.
+#ifdef GOLDILOCKS_HAS_AVX2
     void static hash_full_result(Goldilocks::Element *, const Goldilocks::Element *);
     void static hash(Goldilocks::Element (&state)[CAPACITY], const Goldilocks::Element (&input)[SPONGE_WIDTH]);
     void static linear_hash(Goldilocks::Element *output, Goldilocks::Element *input, uint64_t size);
     void static merkletree_avx(Goldilocks::Element *tree, Goldilocks::Element *input, uint64_t num_cols, uint64_t num_rows, int nThreads = 0, uint64_t dim = 1);
     void static merkletree_batch_avx(Goldilocks::Element *tree, Goldilocks::Element *input, uint64_t num_cols, uint64_t num_rows, uint64_t batch_size, int nThreads = 0, uint64_t dim = 1);
+#endif // GOLDILOCKS_HAS_AVX2
 
 #ifdef __AVX512__
     // Vectorized AVX512:
@@ -83,16 +89,20 @@ inline void PoseidonGoldilocks::merkletree(Goldilocks::Element *tree, Goldilocks
 {
 #ifdef __AVX512__
     merkletree_avx512(tree, input, num_cols, num_rows, nThreads, dim);
-#else
+#elif defined(GOLDILOCKS_HAS_AVX2)
     merkletree_avx(tree, input, num_cols, num_rows, nThreads, dim);
+#else
+    merkletree_seq(tree, input, num_cols, num_rows, nThreads, dim);
 #endif
 }
 inline void PoseidonGoldilocks::merkletree_batch(Goldilocks::Element *tree, Goldilocks::Element *input, uint64_t num_cols, uint64_t num_rows, uint64_t batch_size, int nThreads, uint64_t dim)
 {
 #ifdef __AVX512__
     merkletree_batch_avx512(tree, input, num_cols, num_rows, batch_size, nThreads, dim);
-#else
+#elif defined(GOLDILOCKS_HAS_AVX2)
     merkletree_batch_avx(tree, input, num_cols, num_rows, batch_size, nThreads, dim);
+#else
+    merkletree_batch_seq(tree, input, num_cols, num_rows, batch_size, nThreads, dim);
 #endif
 }
 
@@ -176,7 +186,9 @@ inline void PoseidonGoldilocks::hash_seq(Goldilocks::Element (&state)[CAPACITY],
     std::memcpy(state, aux, CAPACITY * sizeof(Goldilocks::Element));
 }
 
+#ifdef GOLDILOCKS_HAS_AVX2
 #include "poseidon_goldilocks_avx.hpp"
+#endif
 
 #ifdef __AVX512__
 #include "poseidon_goldilocks_avx512.hpp"

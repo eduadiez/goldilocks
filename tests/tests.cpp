@@ -6,7 +6,25 @@
 #include "../src/poseidon_goldilocks.hpp"
 #include "../src/ntt_goldilocks.hpp"
 #include "../src/merklehash_goldilocks.hpp"
+#include "../src/platform.hpp"
+#ifdef GOLDILOCKS_ARCH_X86_64
 #include <immintrin.h>
+#endif
+
+// ARM64 / AVX2 guard policy:
+//
+// GOLDILOCKS_HAS_AVX2 is defined by src/platform.hpp on x86-64 with AVX2.
+// On ARM64 it is not defined, so the 13 AVX2-dependent tests are excluded.
+//
+// 17 scalar-safe tests that compile and pass on ARM64:
+//   GOLDILOCKS_TEST: one, add, sub, mul, div, inv,
+//     poseidon_avx_seq, poseidon_full_seq, linear_hash_seq,
+//     merkletree_seq, merkletree_batch_seq,
+//     ntt, ntt_block, LDE, LDE_block, extendePol
+//   GOLDILOCKS_CUBIC_TEST: one
+//
+// AVX-512 tests were already guarded with #ifdef __AVX512__.
+// CUDA test (merkletree_cuda) is guarded with #ifdef __USE_CUDA__.
 
 #define FFT_SIZE (1 << 4)
 #define NUM_REPS 5
@@ -64,6 +82,7 @@ TEST(GOLDILOCKS_TEST, add)
     Goldilocks::Element b2 = (b1 + b1);
     ASSERT_EQ(Goldilocks::toU64(b2), 0x200000002);
 }
+#ifdef GOLDILOCKS_HAS_AVX2
 TEST(GOLDILOCKS_TEST, add_avx)
 {
     uint64_t in1 = 3;
@@ -127,6 +146,7 @@ TEST(GOLDILOCKS_TEST, add_avx)
     free(b);
     free(c);
 }
+#endif // GOLDILOCKS_HAS_AVX2
 #ifdef __AVX512__
 TEST(GOLDILOCKS_TEST, add_avx512)
 {
@@ -214,6 +234,7 @@ TEST(GOLDILOCKS_TEST, sub)
     Goldilocks::Element b2 = Goldilocks::zero() - a3;
     ASSERT_EQ(Goldilocks::toU64(b2), Goldilocks::from_montgomery(0XFFFFFFFE00000003LL));
 }
+#ifdef GOLDILOCKS_HAS_AVX2
 TEST(GOLDILOCKS_TEST, sub_avx)
 {
     uint64_t in1 = 3;
@@ -303,6 +324,7 @@ TEST(GOLDILOCKS_TEST, sub_avx)
     free(b);
     free(c);
 }
+#endif // GOLDILOCKS_HAS_AVX2
 #ifdef __AVX512__
 TEST(GOLDILOCKS_TEST, sub_avx512)
 {
@@ -386,6 +408,7 @@ TEST(GOLDILOCKS_TEST, mul)
     ASSERT_EQ(Goldilocks::toU64(inE1 * inE2 * inE3), in1 * in2);
     ASSERT_EQ(Goldilocks::toU64(inE1 * inE2 * inE3 * inE4), 0XFFFFFFFEFFFFFEBDLL);
 }
+#ifdef GOLDILOCKS_HAS_AVX2
 TEST(GOLDILOCKS_TEST, mul_avx)
 {
     uint64_t in1 = 3;
@@ -448,6 +471,7 @@ TEST(GOLDILOCKS_TEST, mul_avx)
     free(b);
     free(c);
 }
+#endif // GOLDILOCKS_HAS_AVX2
 #ifdef __AVX512__
 TEST(GOLDILOCKS_TEST, mul_avx512)
 {
@@ -516,6 +540,7 @@ TEST(GOLDILOCKS_TEST, mul_avx512)
 }
 #endif
 
+#ifdef GOLDILOCKS_HAS_AVX2
 TEST(GOLDILOCKS_TEST, mul_avx_8)
 {
     int32_t in1 = 3;
@@ -568,6 +593,7 @@ TEST(GOLDILOCKS_TEST, mul_avx_8)
     free(b);
     free(c);
 }
+#endif // GOLDILOCKS_HAS_AVX2
 #ifdef __AVX512__
 TEST(GOLDILOCKS_TEST, mul_avx512_8)
 {
@@ -635,6 +661,7 @@ TEST(GOLDILOCKS_TEST, mul_avx512_8)
 }
 #endif
 
+#ifdef GOLDILOCKS_HAS_AVX2
 TEST(GOLDILOCKS_TEST, square_avx)
 {
     uint64_t in1 = 3;
@@ -675,6 +702,7 @@ TEST(GOLDILOCKS_TEST, square_avx)
     free(a);
     free(c);
 }
+#endif // GOLDILOCKS_HAS_AVX2
 #ifdef __AVX512__
 TEST(GOLDILOCKS_TEST, square_avx512)
 {
@@ -755,6 +783,7 @@ TEST(GOLDILOCKS_TEST, square_avx512)
 }
 #endif
 
+#ifdef GOLDILOCKS_HAS_AVX2
 TEST(GOLDILOCKS_TEST, dot_avx)
 {
     uint64_t in1 = 3;
@@ -819,6 +848,7 @@ TEST(GOLDILOCKS_TEST, dot_avx)
     free(a);
     free(b);
 }
+#endif // GOLDILOCKS_HAS_AVX2
 #ifdef __AVX512__
 TEST(GOLDILOCKS_TEST, dot_avx512)
 {
@@ -906,6 +936,7 @@ TEST(GOLDILOCKS_TEST, dot_avx512)
 }
 #endif
 
+#ifdef GOLDILOCKS_HAS_AVX2
 TEST(GOLDILOCKS_TEST, mult_avx_4x12)
 {
     uint64_t in1 = 3;
@@ -980,6 +1011,7 @@ TEST(GOLDILOCKS_TEST, mult_avx_4x12)
     free(b1);
     free(b2);
 }
+#endif // GOLDILOCKS_HAS_AVX2
 #ifdef __AVX512__
 TEST(GOLDILOCKS_TEST, mult_avx512_4x12)
 {
@@ -1111,6 +1143,7 @@ TEST(GOLDILOCKS_TEST, mult_avx512_4x12)
 }
 #endif
 
+#ifdef GOLDILOCKS_HAS_AVX2
 TEST(GOLDILOCKS_TEST, mmult_avx)
 {
     uint64_t in1 = 3;
@@ -1263,6 +1296,7 @@ TEST(GOLDILOCKS_TEST, mmult_avx)
     free(Mat);
     free(b);
 }
+#endif // GOLDILOCKS_HAS_AVX2
 #ifdef __AVX512__
 TEST(GOLDILOCKS_TEST, mmult_avx512)
 {
@@ -1517,6 +1551,7 @@ TEST(GOLDILOCKS_TEST, poseidon_avx_seq)
     ASSERT_EQ(Goldilocks::toU64(result0[2]), 0X7953DB0AB48808F4);
     ASSERT_EQ(Goldilocks::toU64(result0[3]), 0XC71603F33A1144CA);
 }
+#ifdef GOLDILOCKS_HAS_AVX2
 TEST(GOLDILOCKS_TEST, poseidon_avx)
 {
 
@@ -1548,6 +1583,7 @@ TEST(GOLDILOCKS_TEST, poseidon_avx)
     ASSERT_EQ(Goldilocks::toU64(result0[2]), 0X7953DB0AB48808F4);
     ASSERT_EQ(Goldilocks::toU64(result0[3]), 0XC71603F33A1144CA);
 }
+#endif // GOLDILOCKS_HAS_AVX2
 #ifdef __AVX512__
 TEST(GOLDILOCKS_TEST, poseidon_avx512)
 {
@@ -1641,6 +1677,7 @@ TEST(GOLDILOCKS_TEST, poseidon_full_seq)
     ASSERT_EQ(Goldilocks::toU64(result0[10]), 0XD070F637B431067C);
     ASSERT_EQ(Goldilocks::toU64(result0[11]), 0X1792B1C4342109D7);
 }
+#ifdef GOLDILOCKS_HAS_AVX2
 TEST(GOLDILOCKS_TEST, poseidon_full_avx)
 {
 
@@ -1688,6 +1725,7 @@ TEST(GOLDILOCKS_TEST, poseidon_full_avx)
     ASSERT_EQ(Goldilocks::toU64(result0[10]), 0XD070F637B431067C);
     ASSERT_EQ(Goldilocks::toU64(result0[11]), 0X1792B1C4342109D7);
 }
+#endif // GOLDILOCKS_HAS_AVX2
 #ifdef __AVX512__
 TEST(GOLDILOCKS_TEST, poseidon_full_avx512)
 {
@@ -1764,6 +1802,7 @@ TEST(GOLDILOCKS_TEST, linear_hash_seq)
     ASSERT_EQ(Goldilocks::toU64(result[2]), 0X7338CC9DBA8256FD);
     ASSERT_EQ(Goldilocks::toU64(result[3]), 0XC1043293021620CE);
 }
+#ifdef GOLDILOCKS_HAS_AVX2
 TEST(GOLDILOCKS_TEST, linear_hash_avx)
 {
 
@@ -1784,6 +1823,7 @@ TEST(GOLDILOCKS_TEST, linear_hash_avx)
     ASSERT_EQ(Goldilocks::toU64(result[2]), 0X7338CC9DBA8256FD);
     ASSERT_EQ(Goldilocks::toU64(result[3]), 0XC1043293021620CE);
 }
+#endif // GOLDILOCKS_HAS_AVX2
 #ifdef __AVX512__
 TEST(GOLDILOCKS_TEST, linear_hash_avx512)
 {
@@ -1880,6 +1920,7 @@ TEST(GOLDILOCKS_TEST, merkletree_seq)
 
     free(tree);
 }
+#ifdef GOLDILOCKS_HAS_AVX2
 TEST(GOLDILOCKS_TEST, merkletree_avx)
 {
     uint64_t ncols_hash = 128;
@@ -1949,6 +1990,7 @@ TEST(GOLDILOCKS_TEST, merkletree_avx)
 
     free(tree);
 }
+#endif // GOLDILOCKS_HAS_AVX2
 #ifdef __AVX512__
 TEST(GOLDILOCKS_TEST, merkletree_avx512)
 {
@@ -2085,6 +2127,7 @@ TEST(GOLDILOCKS_TEST, merkletree_batch_seq)
 
     free(tree);
 }
+#ifdef GOLDILOCKS_HAS_AVX2
 TEST(GOLDILOCKS_TEST, merkletree_batch)
 {
     uint64_t ncols_hash = 128;
@@ -2152,6 +2195,7 @@ TEST(GOLDILOCKS_TEST, merkletree_batch)
 
     free(tree);
 }
+#endif // GOLDILOCKS_HAS_AVX2
 #ifdef __AVX512__
 TEST(GOLDILOCKS_TEST, merkletree_batch_avx512)
 {

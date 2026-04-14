@@ -5,19 +5,61 @@ BUILD_DIR_GPU := ./build_gpu
 SRC_DIRS := ./src
 TEST_DIRS := ./test
 
-include CudaArch.mk
+-include CudaArch.mk
 
-LIBOMP := $(shell find /usr/lib/llvm-* -name "libomp.so" | sed 's/libomp.so//')
-ifndef LIBOMP
-$(error LIBOMP is not set, you need to install libomp-dev)
+### Detect OS and architecture
+KERNEL := $(shell uname -s)
+ARCH   := $(shell uname -m)
+
+### Detect Homebrew prefix (macOS only) and locate libomp
+ifeq ($(KERNEL),Darwin)
+  HOMEBREW_PREFIX := $(shell brew --prefix 2>/dev/null)
+  LIBOMP_PREFIX   := $(shell brew --prefix libomp 2>/dev/null)
+  LIBOMP_INC      := $(LIBOMP_PREFIX)/include
+  LIBOMP_LIB      := $(LIBOMP_PREFIX)/lib
+  LIBOMP_FLAGS    := -Xpreprocessor -fopenmp -I$(LIBOMP_INC) -L$(LIBOMP_LIB) -lomp
+else
+  LIBOMP := $(shell find /usr/lib/llvm-* -name "libomp.so" 2>/dev/null | sed 's/libomp.so//')
+  ifndef LIBOMP
+    $(error LIBOMP is not set, you need to install libomp-dev)
+  endif
+  LIBOMP_FLAGS := -L$(LIBOMP) -fopenmp
 endif
 
-CXX = g++
-CXXFLAGS := -std=c++17 -Wall -pthread -fopenmp
-LDFLAGS := -lpthread -lgmp -lstdc++ -lgmpxx -lbenchmark
+### GMP and GTest locations
+ifeq ($(KERNEL),Darwin)
+  GMP_PREFIX   := $(shell brew --prefix gmp 2>/dev/null)
+  GTEST_PREFIX := $(shell brew --prefix googletest 2>/dev/null)
+  BENCH_PREFIX := $(shell brew --prefix google-benchmark 2>/dev/null)
+  GMP_FLAGS    := -I$(GMP_PREFIX)/include -L$(GMP_PREFIX)/lib
+  GTEST_FLAGS  := -I$(GTEST_PREFIX)/include -L$(GTEST_PREFIX)/lib
+  BENCH_FLAGS  := -I$(BENCH_PREFIX)/include -L$(BENCH_PREFIX)/lib
+else
+  GMP_FLAGS    :=
+  GTEST_FLAGS  :=
+  BENCH_FLAGS  :=
+endif
+
+### Architecture-specific SIMD flags
+ifeq ($(ARCH),x86_64)
+  SIMD_FLAGS := -mavx2
+else
+  SIMD_FLAGS :=
+endif
+
+### Compiler selection
+ifeq ($(KERNEL),Darwin)
+  CXX := clang++
+  CC  := clang
+else
+  CXX := g++
+  CC  := gcc
+endif
+
+CXXFLAGS := -std=c++17 -Wall -pthread $(LIBOMP_FLAGS)
+LDFLAGS  := -lpthread $(GMP_FLAGS) -lgmp -lstdc++ -lgmpxx -lbenchmark
 ASFLAGS := -felf64
 
-CC := gcc
 NVCC := /usr/local/cuda/bin/nvcc
 
 # Debug build flags
@@ -25,16 +67,6 @@ ifeq ($(dbg),1)
       CXXFLAGS += -g
 else
       CXXFLAGS += -O3
-endif
-
-### Establish the operating system name
-KERNEL = $(shell uname -s)
-ifneq ($(KERNEL),Linux)
- $(error "$(KERNEL), is not a valid kernel")
-endif
-ARCH = $(shell uname -m)
-ifneq ($(ARCH),x86_64)
- $(error "$(ARCH), is not a valid architecture")
 endif
 
 SRCS := $(shell find $(SRC_DIRS) -name *.cpp -or -name *.asm -or -name *.cu)
@@ -45,10 +77,10 @@ ALLSRCS := $(shell find $(SRC_DIRS) -name *.cpp -or -name *.asm -or -name *.hpp 
 INC_DIRS := $(shell find $(SRC_DIRS) -type d)
 INC_FLAGS := $(addprefix -I,$(INC_DIRS))
 
-CPPFLAGS ?= $(INC_FLAGS) -MMD -MP -mavx2
+CPPFLAGS ?= $(INC_FLAGS) -MMD -MP $(SIMD_FLAGS)
 
 testcpu: tests/tests.cpp $(ALLSRCS)
-	$(CXX) tests/tests.cpp src/*.cpp -lgtest -lgmp -O3 -Wall -pthread -fopenmp -mavx2 -o $@
+	$(CXX) -std=c++17 tests/tests.cpp src/*.cpp $(GTEST_FLAGS) $(GMP_FLAGS) $(LIBOMP_FLAGS) -lgtest -lgmp -O3 -Wall -pthread $(SIMD_FLAGS) -o $@
 
 $(BUILD_DIR)/$(TARGET_EXEC): $(OBJS)
 	$(CXX) $(OBJS) $(CXXFLAGS) -o $@ $(LDFLAGS)
@@ -61,11 +93,11 @@ $(BUILD_DIR)/%.cpp.o: %.cpp
 # c++ source with CUDA support
 $(BUILD_DIR_GPU)/%.cpp.o: %.cpp
 	$(MKDIR_P) $(dir $@)
-	$(CXX) -D__USE_CUDA__ -mavx2 $(CFLAGS) $(CPPFLAGS) $(CXXFLAGS) $(LDFLAGS) -c $< -o $@
+	$(CXX) -D__USE_CUDA__ $(SIMD_FLAGS) $(CFLAGS) $(CPPFLAGS) $(CXXFLAGS) $(LDFLAGS) -c $< -o $@
 
 $(BUILD_DIR_GPU)/%.cu.o: %.cu
 	$(MKDIR_P) $(dir $@)
-	$(NVCC) -D__USE_CUDA__ -DGPU_TIMING -Iutils -Xcompiler -O3 -Xcompiler -fopenmp -Xcompiler -fPIC -Xcompiler -mavx2 -arch=$(CUDA_ARCH) -dc $< --output-file $@
+	$(NVCC) -D__USE_CUDA__ -DGPU_TIMING -Iutils -Xcompiler -O3 -Xcompiler -fopenmp -Xcompiler -fPIC -Xcompiler $(SIMD_FLAGS) -arch=$(CUDA_ARCH) -dc $< --output-file $@
 
 .PHONY: clean
 
@@ -88,8 +120,8 @@ runfullgpu: full
 runfullcpu: full
 	./full --gtest_filter=GOLDILOCKS_TEST.full_cpu
 
-benchcpu: benchcpu
-	$(CXX) benchs/bench.cpp src/*.cpp -lbenchmark -lpthread -lgmp  -std=c++17 -Wall -pthread -fopenmp -mavx2 -O3 -o $@
+benchcpu: benchs/bench.cpp src/*.cpp
+	$(CXX) $^ $(GMP_FLAGS) $(GTEST_FLAGS) $(BENCH_FLAGS) $(LIBOMP_FLAGS) -lbenchmark -lpthread -lgmp -std=c++17 -Wall -pthread $(SIMD_FLAGS) -O3 -o $@
 
 benchgpu: $(BUILD_DIR_GPU)/benchs/bench.cpp.o $(BUILD_DIR)/src/goldilocks_base_field.cpp.o $(BUILD_DIR)/src/goldilocks_cubic_extension.cpp.o $(BUILD_DIR_GPU)/src/poseidon_goldilocks.cpp.o $(BUILD_DIR_GPU)/src/ntt_goldilocks.cu.o $(BUILD_DIR_GPU)/src/poseidon_goldilocks.cu.o
 	$(NVCC) -Xcompiler -O3 -Xcompiler -fopenmp -arch=$(CUDA_ARCH) -o $@ $^ -lgtest -lgmp -lbenchmark
