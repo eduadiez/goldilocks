@@ -121,17 +121,34 @@ void metal_dispatch_ntt_reverse_permutation(MetalCtxHandle ctx,
                                              uint32_t ncols);
 
 // ntt_butterfly_phase: one thread per (butterfly pair, col) = domain_size/2 * ncols.
-//   buf         = data buffer [domain_size * ncols]  (buffer(0))
-//   twiddles    = twiddle factor buffer [mdiv2]      (buffer(1))
-//   ncols       = column count                       (buffer(2) constant)
-//   domain_size = 2^domainPow                        (buffer(3) constant)
-//   s           = current phase level                (buffer(4) constant)
+//   buf                 = data buffer [domain_size * ncols]  (buffer(0))
+//   twiddles            = full roots array [1 << s_global]    (buffer(1))
+//                         Reused across all phases of a call; staged ONCE
+//                         per NTT_Metal invocation via the twiddle cache.
+//   ncols               = column count                        (buffer(2) constant)
+//   domain_size         = 2^domainPow                         (buffer(3) constant)
+//   s                   = current phase level                 (buffer(4) constant)
+//   roots_stride_shift  = s_global - s                        (buffer(5) constant)
+//                         Kernel reads twiddles[j << roots_stride_shift]
+//                         to get root(s, j); matches CPU `root()` accessor.
 void metal_dispatch_ntt_butterfly_phase(MetalCtxHandle ctx,
                                          MetalBufHandle buf,
                                          MetalBufHandle twiddles,
                                          uint32_t ncols,
                                          uint32_t domain_size,
-                                         uint32_t s);
+                                         uint32_t s,
+                                         uint32_t roots_stride_shift);
+
+// Batched variant: encode ALL phases s = 1..domain_pow in one command buffer
+// with a single waitUntilCompleted. Preferred over per-phase dispatch for
+// small-to-medium N where per-phase commit overhead dominates.
+void metal_dispatch_ntt_butterfly_all_phases(MetalCtxHandle ctx,
+                                              MetalBufHandle buf,
+                                              MetalBufHandle twiddles,
+                                              uint32_t ncols,
+                                              uint32_t domain_size,
+                                              uint32_t domain_pow,
+                                              uint32_t s_global);
 
 // intt_reorder: inverse-NTT index permutation out[(N-i) % N] = in[i], in-place.
 //   buf          = data buffer  (buffer(0))

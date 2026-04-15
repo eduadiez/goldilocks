@@ -80,12 +80,19 @@ kernel void ntt_reverse_permutation(
 //   t  = gl_mul(w, buf[off1 * ncols + col])
 //   buf[off2 * ncols + col] = gl_add(u, t)   -- no lazy needed, gl_add canonicalizes
 //   buf[off1 * ncols + col] = gl_sub(u, t)
+// The kernel reads from a single, instance-wide twiddles buffer that holds
+// the full roots[0 .. 2^s_global) array. For phase s, the twiddle at logical
+// index j is roots[j << (s_global - s)] (matches CPU root(s, j) at
+// ntt_goldilocks.hpp:169-172). `roots_stride_shift` is the per-call
+// stride = s_global - s. This removes the per-phase twiddle buffer
+// allocation + upload that dominated small-N and multi-column runs.
 kernel void ntt_butterfly_phase(
-    device ulong*         buf         [[ buffer(0) ]],
-    device const ulong*   twiddles    [[ buffer(1) ]],
-    constant uint&        ncols       [[ buffer(2) ]],
-    constant uint&        domain_size [[ buffer(3) ]],
-    constant uint&        s           [[ buffer(4) ]],
+    device ulong*         buf                  [[ buffer(0) ]],
+    device const ulong*   twiddles             [[ buffer(1) ]],
+    constant uint&        ncols                [[ buffer(2) ]],
+    constant uint&        domain_size          [[ buffer(3) ]],
+    constant uint&        s                    [[ buffer(4) ]],
+    constant uint&        roots_stride_shift   [[ buffer(5) ]],
     uint tid [[ thread_position_in_grid ]]
 ) {
     uint half_n = domain_size >> 1;
@@ -103,7 +110,7 @@ kernel void ntt_butterfly_phase(
     uint off2 = (g * m + j) * ncols + col;
     uint off1 = (g * m + j + mdiv2) * ncols + col;
 
-    ulong w = twiddles[j];
+    ulong w = twiddles[j << roots_stride_shift];
     ulong u = buf[off2];
     ulong t = gl_mul(w, buf[off1]);
 

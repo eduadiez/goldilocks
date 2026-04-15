@@ -131,29 +131,25 @@ void NTT_Metal(Goldilocks::Element* dst,
 
         // -------------------------------------------------------------------
         // 4. Butterfly phases s = 1 .. domainPow.
-        //    For each level s: mdiv2 = 2^(s-1) twiddle values.
-        //    twiddle[j] = roots[j << (s_global - s)] for j in [0, mdiv2)
+        //    Stage the FULL roots[0..roots_len-1] array ONCE per call via the
+        //    twiddle cache (keyed by roots_len, so repeat calls at the same
+        //    size are free). Each phase dispatch passes the same buffer and
+        //    a per-phase stride shift = s_global - s. The kernel reads
+        //    twiddles[j << shift] to get root(s, j) directly.
+        //
+        //    This replaces the original per-phase allocate/copy/release of
+        //    mdiv2 twiddles, which dominated small-N and multi-column runs.
         // -------------------------------------------------------------------
-        for (uint32_t s = 1; s <= domainPow; s++) {
-            uint32_t mdiv2  = 1u << (s - 1);
-            uint32_t stride = 1u << (s_global - s);  // roots index stride
+        MetalBufHandle tw_buf = metal_twiddle_buffer(
+            ctx,
+            reinterpret_cast<const uint64_t*>(roots_raw),
+            rlen);
 
-            // Build CPU-side twiddle slice
-            std::vector<uint64_t> tw(mdiv2);
-            for (uint32_t j = 0; j < mdiv2; j++) {
-                tw[j] = roots_raw[j * stride].fe;
-            }
-
-            // Upload to Metal buffer
-            MetalBufHandle tw_buf = metal_buf_alloc(ctx, mdiv2 * sizeof(uint64_t));
-            void* tw_ptr = metal_buf_contents(tw_buf);
-            std::memcpy(tw_ptr, tw.data(), mdiv2 * sizeof(uint64_t));
-
-            metal_dispatch_ntt_butterfly_phase(ctx, dst_buf, tw_buf,
-                                                ncols32, domain32, s);
-
-            metal_buf_release(tw_buf);
-        }
+        // All phases in one command buffer with a single waitUntilCompleted.
+        metal_dispatch_ntt_butterfly_all_phases(
+            ctx, dst_buf, tw_buf,
+            ncols32, domain32, domainPow, s_global);
+        // tw_buf is owned by the context's twiddle cache — do NOT release.
 
         // -------------------------------------------------------------------
         // 5. Inverse NTT: scale each element by 1/N mod p.

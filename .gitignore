@@ -26,6 +26,8 @@ benchs/metal_probes/probe_device
 benchs/metal_probes/probe_field
 benchs/metal_probes/probe_poseidon
 benchs/metal_probes/probe_merkle
+benchs/metal_probes/bench_merkle
+benchs/metal_probes/bench_ntt
 *.air
 # Generated from src/poseidon_goldilocks_constants.hpp at build time
 src/metal/kernels/constants.metal.inc
