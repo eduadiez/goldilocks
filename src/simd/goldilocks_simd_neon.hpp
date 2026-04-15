@@ -160,16 +160,66 @@ template <> struct GLSimd<Neon> {
         return r;
     }
 
-    // Phase 1g: scalar mul per lane, branchless reduction.
-    // The `if (adj < 0)` branch creates a mispredict penalty when mixed inputs
-    // trigger it randomly. Rewrite as fully branchless arithmetic.
+    // Phase 1k: full dual-lane reduction in one asm block (Plonky3 pattern).
+    // Every carry/borrow uses csetm for branchless correction. The two lanes
+    // are interleaved by the compiler at register-allocation time; Apple
+    // Silicon's two integer-mul pipes issue one mul+umulh pair per cycle.
     static inline __attribute__((always_inline)) Vec mul_reduced(Vec a, Vec b) {
         uint64_t a0 = vgetq_lane_u64(a, 0);
         uint64_t a1 = vgetq_lane_u64(a, 1);
         uint64_t b0 = vgetq_lane_u64(b, 0);
         uint64_t b1 = vgetq_lane_u64(b, 1);
+        const uint64_t EPS = (uint64_t)GOLDILOCKS_PRIME_NEG;
+        uint64_t r0, r1;
+        uint64_t lo0, hi0, lo1, hi1;
+        uint64_t hh0, hh1, hl0, hl1, s0, s1, he0, he1;
+        uint64_t adj0, adj1, t0, t1;
 
-        uint64_t tmp[2] = { mul_scalar_branchless(a0, b0), mul_scalar_branchless(a1, b1) };
+        asm(
+            "mul   %[lo0], %[a0], %[b0]\n\t"
+            "mul   %[lo1], %[a1], %[b1]\n\t"
+            "umulh %[hi0], %[a0], %[b0]\n\t"
+            "umulh %[hi1], %[a1], %[b1]\n\t"
+            "lsr   %[hh0], %[hi0], #32\n\t"
+            "lsr   %[hh1], %[hi1], #32\n\t"
+            "subs  %[t0],  %[lo0], %[hh0]\n\t"
+            "csetm %w[adj0], cc\n\t"
+            "subs  %[t1],  %[lo1], %[hh1]\n\t"
+            "csetm %w[adj1], cc\n\t"
+            "sub   %[t0],  %[t0], %[adj0]\n\t"
+            "sub   %[t1],  %[t1], %[adj1]\n\t"
+            "and   %[hl0], %[hi0], %[eps]\n\t"
+            "and   %[hl1], %[hi1], %[eps]\n\t"
+            "lsl   %[s0],  %[hl0], #32\n\t"
+            "lsl   %[s1],  %[hl1], #32\n\t"
+            "sub   %[he0], %[s0], %[hl0]\n\t"
+            "sub   %[he1], %[s1], %[hl1]\n\t"
+            "adds  %[r0],  %[t0], %[he0]\n\t"
+            "csetm %w[adj0], cs\n\t"
+            "adds  %[r1],  %[t1], %[he1]\n\t"
+            "csetm %w[adj1], cs\n\t"
+            "add   %[r0],  %[r0], %[adj0]\n\t"
+            "add   %[r1],  %[r1], %[adj1]\n\t"
+            : [r0]"=&r"(r0),   [r1]"=&r"(r1),
+              [lo0]"=&r"(lo0), [lo1]"=&r"(lo1),
+              [hi0]"=&r"(hi0), [hi1]"=&r"(hi1),
+              [hh0]"=&r"(hh0), [hh1]"=&r"(hh1),
+              [hl0]"=&r"(hl0), [hl1]"=&r"(hl1),
+              [s0]"=&r"(s0),   [s1]"=&r"(s1),
+              [he0]"=&r"(he0), [he1]"=&r"(he1),
+              [adj0]"=&r"(adj0), [adj1]"=&r"(adj1),
+              [t0]"=&r"(t0),   [t1]"=&r"(t1)
+            : [a0]"r"(a0), [b0]"r"(b0),
+              [a1]"r"(a1), [b1]"r"(b1),
+              [eps]"r"(EPS)
+            : "cc"
+        );
+        (void)lo0; (void)hi0; (void)lo1; (void)hi1;
+        (void)hh0; (void)hh1; (void)hl0; (void)hl1;
+        (void)s0; (void)s1; (void)he0; (void)he1;
+        (void)adj0; (void)adj1; (void)t0; (void)t1;
+
+        uint64_t tmp[2] = {r0, r1};
         return vld1q_u64(tmp);
     }
 
