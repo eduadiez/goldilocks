@@ -1,0 +1,471 @@
+// metal_context.mm — Metal singleton context: device, queue, library, pipeline
+// and twiddle caches. ARC enabled; all Obj-C objects retained by the singleton.
+//
+// Build: clang++ -std=c++17 -fobjc-arc -ObjC++ -DGOLDILOCKS_HAS_METAL \
+//               -framework Metal -framework Foundation -I../../src
+
+#ifdef GOLDILOCKS_HAS_METAL
+
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+
+#include <string>
+#include <unordered_map>
+#include <mutex>
+#include <cstring>
+#include <cstdlib>
+#include <cstdio>
+
+#include "metal_context.hpp"
+
+// ---------------------------------------------------------------------------
+// Internal Obj-C class holding all Metal state
+// ---------------------------------------------------------------------------
+@interface GoldilocksMetalContext : NSObject {
+@public
+    id<MTLDevice>       _device;
+    id<MTLCommandQueue> _queue;
+    id<MTLLibrary>      _library;
+    std::unordered_map<std::string, id<MTLComputePipelineState>> _pipelineCache;
+    // key = roots_len (number of uint64_t elements)
+    std::unordered_map<uint64_t, id<MTLBuffer>> _twiddleCache;
+    std::mutex _mutex;
+}
+@end
+
+@implementation GoldilocksMetalContext
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _device  = MTLCreateSystemDefaultDevice();
+        if (_device == nil) {
+            NSLog(@"GoldilocksMetalContext: MTLCreateSystemDefaultDevice() returned nil. "
+                  @"No Metal-capable GPU found.");
+            abort();
+        }
+        NSLog(@"GoldilocksMetalContext: Metal device = %@", [_device name]);
+        _queue = [_device newCommandQueue];
+        if (_queue == nil) {
+            NSLog(@"GoldilocksMetalContext: newCommandQueue() failed.");
+            abort();
+        }
+        _library = nil;
+    }
+    return self;
+}
+@end
+
+// ---------------------------------------------------------------------------
+// Singleton via dispatch_once
+// ---------------------------------------------------------------------------
+static GoldilocksMetalContext* g_ctx = nil;
+static dispatch_once_t g_once;
+
+static GoldilocksMetalContext* get_impl(MetalCtxHandle h) {
+    return (__bridge GoldilocksMetalContext*)(h);
+}
+
+// ---------------------------------------------------------------------------
+// Public C API implementation
+// ---------------------------------------------------------------------------
+
+MetalCtxHandle metal_context_get(void) {
+    dispatch_once(&g_once, ^{
+        @autoreleasepool {
+            g_ctx = [[GoldilocksMetalContext alloc] init];
+        }
+    });
+    return (__bridge void*)(g_ctx);
+}
+
+int metal_context_load_library(MetalCtxHandle ctx, const char* metallib_path) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        std::lock_guard<std::mutex> lock(impl->_mutex);
+
+        NSString* path = [NSString stringWithUTF8String:metallib_path];
+        NSURL*    url  = [NSURL fileURLWithPath:path];
+        NSError*  err  = nil;
+        id<MTLLibrary> lib = [impl->_device newLibraryWithURL:url error:&err];
+        if (lib == nil) {
+            NSLog(@"metal_context_load_library: failed to load '%@': %@", path, err);
+            return -1;
+        }
+        impl->_library = lib;
+        NSLog(@"metal_context_load_library: loaded '%@'", path);
+        return 0;
+    }
+}
+
+int metal_context_load_source(MetalCtxHandle ctx, const char* source) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        std::lock_guard<std::mutex> lock(impl->_mutex);
+
+        NSString* src = [NSString stringWithUTF8String:source];
+        MTLCompileOptions* opts = [[MTLCompileOptions alloc] init];
+        NSError* err = nil;
+        id<MTLLibrary> lib = [impl->_device newLibraryWithSource:src
+                                                         options:opts
+                                                           error:&err];
+        if (lib == nil) {
+            NSLog(@"metal_context_load_source: compile failed: %@", err);
+            return -1;
+        }
+        if (err != nil) {
+            // Warnings — not fatal.
+            NSLog(@"metal_context_load_source: compile warnings: %@", err);
+        }
+        impl->_library = lib;
+        return 0;
+    }
+}
+
+MetalPipelineHandle metal_context_pipeline(MetalCtxHandle ctx, const char* kernel_name) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        std::lock_guard<std::mutex> lock(impl->_mutex);
+
+        std::string key(kernel_name);
+        auto it = impl->_pipelineCache.find(key);
+        if (it != impl->_pipelineCache.end()) {
+            // Return raw retained pointer; ARC keeps the object alive in _pipelineCache.
+            return (__bridge void*)(it->second);
+        }
+
+        if (impl->_library == nil) {
+            // Attempt default library fallback (works when linked into an app bundle).
+            impl->_library = [impl->_device newDefaultLibrary];
+            if (impl->_library == nil) {
+                NSLog(@"metal_context_pipeline: no library loaded and newDefaultLibrary "
+                      @"returned nil. Call metal_context_load_library() first.");
+                abort();
+            }
+        }
+
+        NSString* name = [NSString stringWithUTF8String:kernel_name];
+        id<MTLFunction> fn = [impl->_library newFunctionWithName:name];
+        if (fn == nil) {
+            NSLog(@"metal_context_pipeline: kernel '%@' not found in library.", name);
+            abort();
+        }
+
+        NSError* err = nil;
+        id<MTLComputePipelineState> pso =
+            [impl->_device newComputePipelineStateWithFunction:fn error:&err];
+        if (pso == nil) {
+            NSLog(@"metal_context_pipeline: PSO creation failed for '%@': %@", name, err);
+            abort();
+        }
+
+        impl->_pipelineCache[key] = pso;
+        return (__bridge void*)(pso);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Buffer helpers
+// ---------------------------------------------------------------------------
+
+// vm_page_size is declared in <mach/mach.h>; on Apple Silicon it is 16384.
+#include <mach/mach.h>
+
+MetalBufHandle metal_buf_alias(MetalCtxHandle ctx, void* ptr, size_t bytes, int* is_copy) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        *is_copy = 0;
+
+        uintptr_t addr = (uintptr_t)ptr;
+        if (ptr != NULL && (addr & (vm_page_size - 1)) == 0) {
+            // Page-aligned: create zero-copy alias buffer.
+            // Align size up to page boundary as required by the API.
+            size_t aligned_len = (bytes + vm_page_size - 1) & ~(vm_page_size - 1);
+            id<MTLBuffer> buf =
+                [impl->_device newBufferWithBytesNoCopy:ptr
+                                                 length:aligned_len
+                                                options:MTLResourceStorageModeShared
+                                            deallocator:nil];
+            if (buf != nil) {
+                return (__bridge_retained void*)(buf);
+            }
+            // Fall through to copy path if alias fails.
+        }
+
+        // Not page-aligned or alias failed: copy in.
+        *is_copy = 1;
+        id<MTLBuffer> buf =
+            [impl->_device newBufferWithBytes:ptr
+                                       length:bytes
+                                      options:MTLResourceStorageModeShared];
+        if (buf == nil) {
+            NSLog(@"metal_buf_alias: newBufferWithBytes failed (size=%zu)", bytes);
+            abort();
+        }
+        return (__bridge_retained void*)(buf);
+    }
+}
+
+MetalBufHandle metal_buf_alloc(MetalCtxHandle ctx, size_t bytes) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        id<MTLBuffer> buf =
+            [impl->_device newBufferWithLength:bytes
+                                       options:MTLResourceStorageModeShared];
+        if (buf == nil) {
+            NSLog(@"metal_buf_alloc: newBufferWithLength failed (size=%zu)", bytes);
+            abort();
+        }
+        return (__bridge_retained void*)(buf);
+    }
+}
+
+void* metal_buf_contents(MetalBufHandle buf) {
+    id<MTLBuffer> b = (__bridge id<MTLBuffer>)(buf);
+    return [b contents];
+}
+
+void metal_buf_release(MetalBufHandle buf) {
+    // Release the +1 retain count taken by __bridge_retained in metal_buf_alias/alloc.
+    id<MTLBuffer> b = (__bridge_transfer id<MTLBuffer>)(buf);
+    (void)b;  // ARC releases when b goes out of scope.
+}
+
+// ---------------------------------------------------------------------------
+// Twiddle cache
+// ---------------------------------------------------------------------------
+
+MetalBufHandle metal_twiddle_buffer(MetalCtxHandle ctx,
+                                     const uint64_t* roots_ptr,
+                                     uint64_t roots_len) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        std::lock_guard<std::mutex> lock(impl->_mutex);
+
+        auto it = impl->_twiddleCache.find(roots_len);
+        if (it != impl->_twiddleCache.end()) {
+            return (__bridge void*)(it->second);
+        }
+
+        size_t bytes = roots_len * sizeof(uint64_t);
+        id<MTLBuffer> buf =
+            [impl->_device newBufferWithBytes:roots_ptr
+                                       length:bytes
+                                      options:MTLResourceStorageModeShared];
+        if (buf == nil) {
+            NSLog(@"metal_twiddle_buffer: allocation failed for %llu roots", roots_len);
+            abort();
+        }
+        impl->_twiddleCache[roots_len] = buf;
+        return (__bridge void*)(buf);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch helpers — internal helper macro
+// ---------------------------------------------------------------------------
+
+// Returns the optimal threadgroup size capped at the PSO's maxTotalThreadsPerThreadgroup.
+static NSUInteger threadgroup_size_for(id<MTLComputePipelineState> pso, NSUInteger desired) {
+    NSUInteger max_tpg = [pso maxTotalThreadsPerThreadgroup];
+    return (desired < max_tpg) ? desired : max_tpg;
+}
+
+// ---------------------------------------------------------------------------
+// merkle_leaves dispatch
+// ---------------------------------------------------------------------------
+void metal_dispatch_merkle_leaves(MetalCtxHandle ctx,
+                                   MetalBufHandle in_buf,
+                                   MetalBufHandle tree_buf,
+                                   uint32_t ncols,
+                                   uint32_t dim,
+                                   uint32_t num_rows) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        id<MTLComputePipelineState> pso =
+            (__bridge id<MTLComputePipelineState>)(
+                metal_context_pipeline(ctx, "merkle_leaves"));
+
+        id<MTLCommandBuffer>        cmd = [impl->_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(in_buf)   offset:0 atIndex:0];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(tree_buf) offset:0 atIndex:1];
+        [enc setBytes:&ncols length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&dim   length:sizeof(uint32_t) atIndex:3];
+
+        NSUInteger tpg = threadgroup_size_for(pso, 64);
+        NSUInteger groups = ((NSUInteger)num_rows + tpg - 1) / tpg;
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// merkle_parents dispatch
+// ---------------------------------------------------------------------------
+void metal_dispatch_merkle_parents(MetalCtxHandle ctx,
+                                    MetalBufHandle buf,
+                                    uint32_t nextIndex,
+                                    uint32_t pending,
+                                    uint32_t nextN) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        id<MTLComputePipelineState> pso =
+            (__bridge id<MTLComputePipelineState>)(
+                metal_context_pipeline(ctx, "merkle_parents"));
+
+        id<MTLCommandBuffer>        cmd = [impl->_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(buf) offset:0 atIndex:0];
+        [enc setBytes:&nextIndex length:sizeof(uint32_t) atIndex:1];
+        [enc setBytes:&pending   length:sizeof(uint32_t) atIndex:2];
+
+        NSUInteger tpg = threadgroup_size_for(pso, 64);
+        NSUInteger groups = ((NSUInteger)nextN + tpg - 1) / tpg;
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ntt_reverse_permutation dispatch
+// ---------------------------------------------------------------------------
+void metal_dispatch_ntt_reverse_permutation(MetalCtxHandle ctx,
+                                             MetalBufHandle buf,
+                                             uint32_t domainPow,
+                                             uint32_t ncols) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        id<MTLComputePipelineState> pso =
+            (__bridge id<MTLComputePipelineState>)(
+                metal_context_pipeline(ctx, "ntt_reverse_permutation"));
+
+        uint32_t domain_size = 1u << domainPow;
+
+        id<MTLCommandBuffer>        cmd = [impl->_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(buf) offset:0 atIndex:0];
+        [enc setBytes:&domainPow  length:sizeof(uint32_t) atIndex:1];
+        [enc setBytes:&ncols      length:sizeof(uint32_t) atIndex:2];
+
+        NSUInteger tpg = threadgroup_size_for(pso, 64);
+        NSUInteger groups = ((NSUInteger)domain_size + tpg - 1) / tpg;
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ntt_butterfly_phase dispatch
+// ---------------------------------------------------------------------------
+void metal_dispatch_ntt_butterfly_phase(MetalCtxHandle ctx,
+                                         MetalBufHandle buf,
+                                         MetalBufHandle twiddles,
+                                         uint32_t ncols,
+                                         uint32_t domain_size,
+                                         uint32_t s) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        id<MTLComputePipelineState> pso =
+            (__bridge id<MTLComputePipelineState>)(
+                metal_context_pipeline(ctx, "ntt_butterfly_phase"));
+
+        uint32_t half  = domain_size >> 1;
+        uint32_t total = half * ncols;  // total threads
+
+        id<MTLCommandBuffer>        cmd = [impl->_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(buf)      offset:0 atIndex:0];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(twiddles) offset:0 atIndex:1];
+        [enc setBytes:&ncols       length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&domain_size length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&s           length:sizeof(uint32_t) atIndex:4];
+
+        NSUInteger tpg = threadgroup_size_for(pso, 64);
+        NSUInteger groups = ((NSUInteger)total + tpg - 1) / tpg;
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// intt_scale dispatch
+// ---------------------------------------------------------------------------
+void metal_dispatch_intt_reorder(MetalCtxHandle ctx,
+                                  MetalBufHandle buf,
+                                  uint32_t domain_size,
+                                  uint32_t ncols) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        id<MTLComputePipelineState> pso =
+            (__bridge id<MTLComputePipelineState>)(
+                metal_context_pipeline(ctx, "intt_reorder"));
+
+        id<MTLCommandBuffer>        cmd = [impl->_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(buf) offset:0 atIndex:0];
+        [enc setBytes:&domain_size length:sizeof(uint32_t) atIndex:1];
+        [enc setBytes:&ncols       length:sizeof(uint32_t) atIndex:2];
+
+        // Dispatch (domain_size/2) threads; each handles pair (i+1, N-(i+1)).
+        NSUInteger threads = (NSUInteger)(domain_size / 2);
+        NSUInteger tpg = threadgroup_size_for(pso, 64);
+        NSUInteger groups = (threads + tpg - 1) / tpg;
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+}
+
+void metal_dispatch_intt_scale(MetalCtxHandle ctx,
+                                MetalBufHandle buf,
+                                uint64_t inv_n,
+                                uint32_t count) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        id<MTLComputePipelineState> pso =
+            (__bridge id<MTLComputePipelineState>)(
+                metal_context_pipeline(ctx, "intt_scale"));
+
+        id<MTLCommandBuffer>        cmd = [impl->_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(buf) offset:0 atIndex:0];
+        [enc setBytes:&inv_n  length:sizeof(uint64_t) atIndex:1];
+        [enc setBytes:&count  length:sizeof(uint32_t) atIndex:2];
+
+        NSUInteger tpg = threadgroup_size_for(pso, 64);
+        NSUInteger groups = ((NSUInteger)count + tpg - 1) / tpg;
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+}
+
+#endif // GOLDILOCKS_HAS_METAL

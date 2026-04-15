@@ -397,3 +397,11 @@ void NTT_Goldilocks::extendPol(Goldilocks::Element *output, Goldilocks::Element 
         free(tmp);
     }
 }
+
+#ifdef GOLDILOCKS_HAS_METAL
+#include "metal/goldilocks_metal.hpp"
+void NTT_Goldilocks::NTT_Metal(Goldilocks::Element* dst, Goldilocks::Element* src,
+                               uint64_t size, uint64_t ncols, bool inverse) {
+    goldilocks_metal::NTT_Metal(dst, src, size, ncols, this, inverse);
+}
+#endif

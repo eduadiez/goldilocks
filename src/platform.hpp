@@ -37,6 +37,13 @@
 #  endif
 #endif
 
+// Metal GPU (Apple Silicon, macOS only)
+// Auto-enabled on __APPLE__ + __aarch64__ unless user predefines GOLDILOCKS_NO_METAL.
+// To disable: add -DGOLDILOCKS_NO_METAL to your compile flags.
+#if defined(__APPLE__) && defined(__aarch64__) && !defined(GOLDILOCKS_NO_METAL)
+#  define GOLDILOCKS_HAS_METAL
+#endif
+
 // OS detection
 #if defined(__APPLE__)
 #  define GOLDILOCKS_OS_MACOS

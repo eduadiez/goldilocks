@@ -135,6 +135,64 @@ runbenchcpu_neon: benchcpu
 runbenchgpu: benchgpu
 	./benchgpu --benchmark_filter=MERKLETREE_BENCH_CUDA
 
+# ============================================================================
+# Metal (Darwin + GOLDILOCKS_HAS_METAL) — Apple Silicon only
+# ============================================================================
+ifeq ($(KERNEL),Darwin)
+
+SRCS_CPP := $(filter-out ./src/tests/%,$(filter %.cpp,$(SRCS)))
+
+METAL_FLAGS := -framework Metal -framework Foundation -framework QuartzCore
+METAL_CXX   := $(CXX) -fobjc-arc -std=c++17 -DGOLDILOCKS_HAS_METAL
+METAL_SHADERS_DIR := src/metal/kernels
+METAL_SHADERS := $(METAL_SHADERS_DIR)/field.metal $(METAL_SHADERS_DIR)/poseidon.metal $(METAL_SHADERS_DIR)/ntt.metal
+METAL_AIR := $(patsubst %.metal,$(BUILD_DIR)/%.air,$(METAL_SHADERS))
+METALLIB := $(BUILD_DIR)/goldilocks.metallib
+METAL_CONSTS := $(METAL_SHADERS_DIR)/constants.metal.inc
+METAL_MM_SRCS := src/metal/metal_context.mm src/metal/poseidon_metal.mm src/metal/ntt_metal.mm
+METAL_MM_OBJS := $(patsubst %.mm,$(BUILD_DIR)/%.mm.o,$(METAL_MM_SRCS))
+
+# Codegen for constants
+$(METAL_CONSTS): tools/gen_metal_constants.cpp src/poseidon_goldilocks_constants.hpp
+	@mkdir -p $(BUILD_DIR) $(METAL_SHADERS_DIR)
+	$(CXX) -std=c++17 -O0 -Isrc $(GMP_FLAGS) tools/gen_metal_constants.cpp -o $(BUILD_DIR)/gen_metal_constants
+	$(BUILD_DIR)/gen_metal_constants $(METAL_CONSTS)
+
+# .metal -> .air (needs constants.metal.inc)
+$(BUILD_DIR)/%.air: %.metal $(METAL_CONSTS)
+	@mkdir -p $(dir $@)
+	xcrun -sdk macosx metal -std=metal3.0 -c -I$(METAL_SHADERS_DIR) $< -o $@
+
+# .air -> .metallib
+$(METALLIB): $(METAL_AIR)
+	xcrun -sdk macosx metallib $^ -o $@
+
+# .mm -> .o
+$(BUILD_DIR)/%.mm.o: %.mm
+	@mkdir -p $(dir $@)
+	$(METAL_CXX) -I. -Isrc $(GMP_FLAGS) $(LIBOMP_FLAGS) -c $< -o $@
+
+# testmetal target
+testmetal: $(METALLIB) $(METAL_MM_OBJS) src/tests/tests_metal.cpp $(SRCS_CPP)
+	$(METAL_CXX) -O3 -I. -Isrc $(GTEST_FLAGS) $(GMP_FLAGS) $(LIBOMP_FLAGS) \
+	  src/tests/tests_metal.cpp $(SRCS_CPP) $(METAL_MM_OBJS) \
+	  -o $@ -lgtest -lgmp -lstdc++ -lpthread $(METAL_FLAGS)
+
+runtestmetal: testmetal $(METALLIB)
+	cp $(METALLIB) goldilocks.metallib
+	./testmetal --gtest_filter=GOLDILOCKS_TEST.merkletree_metal
+
+clean-metal:
+	rm -f $(METAL_AIR) $(METALLIB) $(METAL_MM_OBJS) $(METAL_CONSTS) testmetal goldilocks.metallib
+
+# Hook into top-level clean so `make clean` removes Metal artifacts too.
+clean: clean-metal
+
+.PHONY: testmetal runtestmetal clean-metal
+
+endif  # Darwin
+# ============================================================================
+
 # Standalone NEON mul fuzz harness (Phase 1 Part 2 verification)
 check_neon_mul: tests/check_neon_mul.cpp src/goldilocks_base_field.cpp
 	$(CXX) -std=c++17 $^ $(GMP_FLAGS) -lgmp -O2 -o $@
