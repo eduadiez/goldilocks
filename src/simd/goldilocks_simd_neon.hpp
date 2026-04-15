@@ -130,79 +130,70 @@ template <> struct GLSimd<Neon> {
     //   This matches the existing scalar Goldilocks::mul algorithm bit-for-bit.
     //   No __uint128_t is used. No movehdup-style 32-bit lane extraction tricks.
     // ------------------------------------------------------------------------
-    static inline __attribute__((always_inline)) Vec mul(Vec a, Vec b) {
-        // --- Step 1: 4× vmull_u32 → c_hi:c_lo ---
-        uint32x2_t a_lo32 = vmovn_u64(a);
-        uint32x2_t a_hi32 = vshrn_n_u64(a, 32);
-        uint32x2_t b_lo32 = vmovn_u64(b);
-        uint32x2_t b_hi32 = vshrn_n_u64(b, 32);
+    // Phase 1e: scalar mul+umulh per lane via __uint128_t. Matches Plonky3's
+    // aarch64_neon/packing.rs:295-395 approach. Apple Silicon has 2 integer
+    // multiply pipes; out-of-order execution interleaves the two lane muls
+    // to hit ~2x integer-mul throughput. NEON vmull_u32 has worse latency and
+    // fewer issue slots on M-series than scalar mul+umulh.
+    //
+    // Reduction follows scalar Goldilocks::mul: 2^64 ≡ 2^32 - 1 (mod p).
+    // Non-canonical output in [0, 2^64); public mul() canonicalizes.
+    static inline __attribute__((always_inline)) uint64_t mul_scalar(uint64_t a, uint64_t b) {
+        __uint128_t prod = (__uint128_t)a * (__uint128_t)b;
+        uint64_t c_lo = (uint64_t)prod;
+        uint64_t c_hi = (uint64_t)(prod >> 64);
+        uint64_t c_hi_lo = (uint32_t)c_hi;
+        uint64_t c_hi_hi = c_hi >> 32;
 
-        uint64x2_t ll = vmull_u32(a_lo32, b_lo32);
-        uint64x2_t lh = vmull_u32(a_lo32, b_hi32);
-        uint64x2_t hl = vmull_u32(a_hi32, b_lo32);
-        uint64x2_t hh = vmull_u32(a_hi32, b_hi32);
+        uint64_t s = c_lo - c_hi;
+        bool borrow = s > c_lo;
+        uint64_t s2 = s + (c_hi_lo << 32);
+        bool carry2 = s2 < s;
+        // Plonky3 shift-sub: c_hi_hi * EPSILON = (c_hi_hi << 32) - c_hi_hi
+        uint64_t s3 = s2 + ((c_hi_hi << 32) - c_hi_hi);
+        bool carry3 = s3 < s2;
 
-        // mid = lh + hl (may overflow 64 bits)
-        uint64x2_t mid = vaddq_u64(lh, hl);
-        uint64x2_t mid_carry = vcltq_u64(mid, lh);       // all-ones if carry
-        uint64x2_t mid_carry_bit = vandq_u64(mid_carry, vdupq_n_u64(1));
-
-        // c_lo = ll + (mid << 32)
-        uint64x2_t mid_shl32 = vshlq_n_u64(mid, 32);
-        uint64x2_t c_lo = vaddq_u64(ll, mid_shl32);
-        uint64x2_t c_lo_carry = vcltq_u64(c_lo, ll);
-        uint64x2_t c_lo_carry_bit = vandq_u64(c_lo_carry, vdupq_n_u64(1));
-
-        // c_hi = hh + (mid >> 32) + (mid_carry_bit << 32) + c_lo_carry_bit
-        uint64x2_t mid_shr32 = vshrq_n_u64(mid, 32);
-        uint64x2_t c_hi = vaddq_u64(hh, mid_shr32);
-        c_hi = vaddq_u64(c_hi, vshlq_n_u64(mid_carry_bit, 32));
-        c_hi = vaddq_u64(c_hi, c_lo_carry_bit);
-
-        // --- Step 2: Goldilocks reduction ---
-        const uint64x2_t mask32 = vdupq_n_u64(0xFFFFFFFFULL);
-        uint64x2_t c_hi_lo = vandq_u64(c_hi, mask32);
-        uint64x2_t c_hi_hi = vshrq_n_u64(c_hi, 32);
-
-        // s = c_lo - c_hi, borrow if s > c_lo
-        uint64x2_t s = vsubq_u64(c_lo, c_hi);
-        uint64x2_t borrow_mask = vcgtq_u64(s, c_lo);
-        uint64x2_t borrow_bit = vandq_u64(borrow_mask, vdupq_n_u64(1));
-
-        // s2 = s + (c_hi_lo << 32), carry if s2 < s
-        uint64x2_t s2 = vaddq_u64(s, vshlq_n_u64(c_hi_lo, 32));
-        uint64x2_t carry2_mask = vcltq_u64(s2, s);
-        uint64x2_t carry2_bit = vandq_u64(carry2_mask, vdupq_n_u64(1));
-
-        // s3 = s2 + c_hi_hi * CQ  (c_hi_hi < 2^32, CQ = 2^32-1 < 2^32, product < 2^64)
-        uint32x2_t c_hi_hi_32 = vmovn_u64(c_hi_hi);
-        uint32x2_t cq_32 = vdup_n_u32((uint32_t)GOLDILOCKS_PRIME_NEG);
-        uint64x2_t hh_times_cq = vmull_u32(c_hi_hi_32, cq_32);
-        uint64x2_t s3 = vaddq_u64(s2, hh_times_cq);
-        uint64x2_t carry3_mask = vcltq_u64(s3, s2);
-        uint64x2_t carry3_bit = vandq_u64(carry3_mask, vdupq_n_u64(1));
-
-        // r = s3 + (carry2 + carry3) * CQ - borrow * CQ
-        // Use unsigned arithmetic because CQ = 2^32 - 1 does NOT fit in int32 (it sign-extends to -1).
-        uint64x2_t pos_sum = vaddq_u64(carry2_bit, carry3_bit);      // 0, 1, or 2 per lane
-        uint32x2_t pos_sum32 = vmovn_u64(pos_sum);
-        uint32x2_t cq_u32 = vdup_n_u32((uint32_t)GOLDILOCKS_PRIME_NEG);
-        uint64x2_t pos_cq = vmull_u32(pos_sum32, cq_u32);            // (0..2) * CQ, fits in 33 bits
-
-        uint64x2_t cq_vec = vdupq_n_u64((uint64_t)GOLDILOCKS_PRIME_NEG);
-        uint64x2_t neg_cq = vandq_u64(borrow_mask, cq_vec);          // CQ if borrow, else 0
-
-        uint64x2_t r = vaddq_u64(s3, pos_cq);
-        r = vsubq_u64(r, neg_cq);
-
-        // Final canonicalize: if r >= p then r -= p
-        uint64x2_t ge_p_mask = vcgeq_u64(r, P);
-        uint64x2_t sub_amt = vandq_u64(ge_p_mask, P);
-        return vsubq_u64(r, sub_amt);
+        int adj = (int)carry2 + (int)carry3 - (int)borrow;
+        uint64_t r = s3 + (uint64_t)adj * (uint64_t)GOLDILOCKS_PRIME_NEG;
+        if (adj < 0) r = s3 - (uint64_t)GOLDILOCKS_PRIME_NEG;
+        return r;
     }
 
+    static inline __attribute__((always_inline)) Vec mul_reduced(Vec a, Vec b) {
+        uint64_t a0 = vgetq_lane_u64(a, 0);
+        uint64_t a1 = vgetq_lane_u64(a, 1);
+        uint64_t b0 = vgetq_lane_u64(b, 0);
+        uint64_t b1 = vgetq_lane_u64(b, 1);
+        uint64_t r0 = mul_scalar(a0, b0);
+        uint64_t r1 = mul_scalar(a1, b1);
+        uint64_t tmp[2] = {r0, r1};
+        return vld1q_u64(tmp);
+    }
+
+    // Public canonical mul — preserves the [0, P) output contract.
+    static inline __attribute__((always_inline)) Vec mul(Vec a, Vec b) {
+        uint64x2_t r = mul_reduced(a, b);
+        uint64x2_t ge_p_mask = vcgeq_u64(r, P);
+        return vsubq_u64(r, vandq_u64(ge_p_mask, P));
+    }
+
+    // Non-canonical square. Alias for mul_reduced(a, a).
+    static inline __attribute__((always_inline)) Vec square_reduced(Vec a) {
+        return mul_reduced(a, a);
+    }
     static inline __attribute__((always_inline)) Vec square(Vec a) {
-        return mul(a, a);  // Phase 1: correctness-first. Specialize later if profiling demands.
+        return mul(a, a);
+    }
+
+    // Final canonicalizer for use right before store. Non-canonical → canonical.
+    // Must handle inputs up to [0, 2^64). If r > P but r < 2P, one subtract suffices.
+    // Wrap-around corrections in add can push intermediate values close to 2^64; the
+    // double-subtract ensures r ∈ [0, P) on exit.
+    static inline __attribute__((always_inline)) Vec canonicalize(Vec r) {
+        uint64x2_t ge_p = vcgeq_u64(r, P);
+        r = vsubq_u64(r, vandq_u64(ge_p, P));
+        ge_p = vcgeq_u64(r, P);
+        return vsubq_u64(r, vandq_u64(ge_p, P));
     }
 
     // Composite / lane mixing

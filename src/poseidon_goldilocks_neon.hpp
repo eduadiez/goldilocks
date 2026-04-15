@@ -18,6 +18,8 @@ inline void PoseidonGoldilocks::hash_neon(Goldilocks::Element (&state)[CAPACITY]
 inline void PoseidonGoldilocks::pow7_neon(uint64x2_t st[6])
 {
     using N = goldilocks::simd::GLSimd<goldilocks::simd::Neon>;
+    // Phase 1e: use non-canonical mul/square. Outputs may exceed P but stay
+    // in [0, 2^64); mul_reduced accepts any input in that range.
     for (int i = 0; i < 6; ++i) {
         auto pw2 = N::square(st[i]);
         auto pw4 = N::square(pw2);
@@ -89,6 +91,8 @@ inline Goldilocks::Element PoseidonGoldilocks::dot_neon(const Goldilocks::Elemen
         uint64x2_t cv = N::load(&C[i * 2]);
         acc = N::add(acc, N::mul(xv, cv));
     }
+    // Canonicalize acc lane values before horizontal reduce
+    acc = N::canonicalize(acc);
     Goldilocks::Element lanes[2];
     N::store(lanes, acc);
     Goldilocks::Element r;
