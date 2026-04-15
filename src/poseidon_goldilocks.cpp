@@ -482,12 +482,22 @@ void PoseidonGoldilocks::hash_full_result_neon_2(
         // st[0] += C[...+r]
         st[0] = N::add(st[0], N::splat(PoseidonGoldilocksConstants::C[(HALF_N_FULL_ROUNDS + 1) * SPONGE_WIDTH + r].fe));
 
-        // s0 = dot(state, S_prefix) — both hashes in parallel
+        // Phase 1o: bulk-reduce dot product. Accumulate 12 full 64-bit muls into
+        // (sum_lo, sum_hi, cl_carries, ch_carries) per lane, reduce once.
         const Goldilocks::Element *S = &PoseidonGoldilocksConstants::S[(SPONGE_WIDTH * 2 - 1) * r];
-        uint64x2_t s0 = N::splat(0);
+        uint64_t slo0 = 0, shi0 = 0, cl0 = 0, ch0 = 0;
+        uint64_t slo1 = 0, shi1 = 0, cl1 = 0, ch1 = 0;
         for (int k = 0; k < SPONGE_WIDTH; ++k) {
-            s0 = N::add(s0, N::mul_reduced(st[k], N::splat(S[k].fe)));
+            uint64_t a0 = vgetq_lane_u64(st[k], 0);
+            uint64_t a1 = vgetq_lane_u64(st[k], 1);
+            N::accumulate_full_pair(a0, a1, S[k].fe,
+                slo0, shi0, cl0, ch0,
+                slo1, shi1, cl1, ch1);
         }
+        uint64_t r0 = N::finalize_full_sum(slo0, shi0, cl0, ch0);
+        uint64_t r1 = N::finalize_full_sum(slo1, shi1, cl1, ch1);
+        uint64_t tmp_s0[2] = {r0, r1};
+        uint64x2_t s0 = vld1q_u64(tmp_s0);
 
         // W[k] = st[0] * S[SPONGE_WIDTH - 1 + k], state[k] += W[k]
         uint64x2_t st0_saved = st[0];

@@ -284,6 +284,95 @@ template <> struct GLSimd<Neon> {
         (void)lo0; (void)lo1; (void)hi0; (void)hi1;
     }
 
+    // Phase 1o: bulk-accumulate for FULL 64-bit × 64-bit products (used in
+    // partial-round dot, where the S constants are full-range 64-bit values
+    // that don't fit the mul_small path).
+    //
+    // Math: for each mul a*s, (lo, hi) are the 128-bit parts. hi can be any
+    // 64-bit value, so sum_hi itself overflows across the 12 accumulations.
+    // Track two carry counters:
+    //   cl_carries = count of sum_lo wraps
+    //   ch_carries = count of sum_hi wraps
+    //
+    // Final reduction (mod p):
+    //   Total = sum_lo + cl_carries*2^64 + (sum_hi + ch_carries*2^64) * 2^64
+    //         ≡ sum_lo + (cl_carries + sum_hi) * EPSILON + ch_carries * EPSILON²  (mod p)
+    //
+    // EPSILON² mod p = p - 2^32 = -2^32 (mod p), so ch_carries * EPSILON²
+    // ≡ -ch_carries * 2^32. See finalize_full_sum.
+    static inline __attribute__((always_inline)) void accumulate_full_pair(
+        uint64_t a0, uint64_t a1, uint64_t s,
+        uint64_t& sum_lo0, uint64_t& sum_hi0, uint64_t& cl0, uint64_t& ch0,
+        uint64_t& sum_lo1, uint64_t& sum_hi1, uint64_t& cl1, uint64_t& ch1)
+    {
+        uint64_t lo0, hi0, lo1, hi1;
+        asm(
+            "mul   %[lo0], %[a0], %[s]\n\t"
+            "mul   %[lo1], %[a1], %[s]\n\t"
+            "umulh %[hi0], %[a0], %[s]\n\t"
+            "umulh %[hi1], %[a1], %[s]\n\t"
+            "adds  %[slo0], %[slo0], %[lo0]\n\t"
+            "adc   %[cl0],  %[cl0],  xzr\n\t"
+            "adds  %[shi0], %[shi0], %[hi0]\n\t"
+            "adc   %[ch0],  %[ch0],  xzr\n\t"
+            "adds  %[slo1], %[slo1], %[lo1]\n\t"
+            "adc   %[cl1],  %[cl1],  xzr\n\t"
+            "adds  %[shi1], %[shi1], %[hi1]\n\t"
+            "adc   %[ch1],  %[ch1],  xzr\n\t"
+            : [lo0]"=&r"(lo0), [lo1]"=&r"(lo1),
+              [hi0]"=&r"(hi0), [hi1]"=&r"(hi1),
+              [slo0]"+&r"(sum_lo0), [shi0]"+&r"(sum_hi0),
+              [cl0]"+&r"(cl0),     [ch0]"+&r"(ch0),
+              [slo1]"+&r"(sum_lo1), [shi1]"+&r"(sum_hi1),
+              [cl1]"+&r"(cl1),     [ch1]"+&r"(ch1)
+            : [a0]"r"(a0), [a1]"r"(a1), [s]"r"(s)
+            : "cc"
+        );
+        (void)lo0; (void)lo1; (void)hi0; (void)hi1;
+    }
+
+    // Final reduction for the full-mul bulk accumulator.
+    // r ≡ sum_lo + (cl_carries + sum_hi) * EPSILON - ch_carries * 2^32  (mod p)
+    // Since ch_carries ≤ 12, ch_carries * 2^32 is small. Output non-canonical in [0, 2^64).
+    static inline __attribute__((always_inline)) uint64_t finalize_full_sum(
+        uint64_t sum_lo, uint64_t sum_hi, uint64_t cl_carries, uint64_t ch_carries)
+    {
+        // + (sum_hi + cl_carries) * EPSILON
+        uint64_t total_eps_coeff = sum_hi + cl_carries;  // sum_hi adds only up to 2^64, cl_carries ≤ 12
+        // total_eps_coeff can be any 64-bit value (sum_hi is 64-bit)
+        // So this isn't small. Compute full-width multiply by EPSILON.
+        // (total_eps_coeff * EPSILON) as 128-bit, reduce again via 2^64 ≡ EPSILON.
+        __uint128_t eps_prod = (__uint128_t)total_eps_coeff * (uint64_t)GOLDILOCKS_PRIME_NEG;
+        uint64_t ep_lo = (uint64_t)eps_prod;
+        uint64_t ep_hi = (uint64_t)(eps_prod >> 64);
+
+        // Subtract ch_carries * 2^32 (small; ≤ 12 * 2^32)
+        uint64_t sub_term = ch_carries << 32;
+
+        // r = sum_lo + ep_lo + ep_hi * EPSILON - sub_term  (mod p, via 2^64 ≡ EPSILON)
+        // ep_hi is small (≤ about 2 * EPSILON) because total_eps_coeff < 2^64 and EPSILON < 2^32,
+        // so ep_prod < 2^96, ep_hi < 2^32. So ep_hi * EPSILON fits in ~2^64.
+        uint64_t ep_hi_eps = (ep_hi << 32) - ep_hi;  // ep_hi * EPSILON via shift-sub
+
+        // Accumulate: r = sum_lo + ep_lo + ep_hi_eps - sub_term  (with wrap handling)
+        uint64_t r, adj1, adj2, adj3;
+        asm(
+            "adds  %[r], %[slo], %[elo]\n\t"
+            "csetm %w[a1], cs\n\t"
+            "add   %[r], %[r], %[a1]\n\t"
+            "adds  %[r], %[r], %[ehe]\n\t"
+            "csetm %w[a2], cs\n\t"
+            "add   %[r], %[r], %[a2]\n\t"
+            "subs  %[r], %[r], %[sub]\n\t"
+            "csetm %w[a3], cc\n\t"
+            "sub   %[r], %[r], %[a3]\n\t"
+            : [r]"=&r"(r), [a1]"=&r"(adj1), [a2]"=&r"(adj2), [a3]"=&r"(adj3)
+            : [slo]"r"(sum_lo), [elo]"r"(ep_lo), [ehe]"r"(ep_hi_eps), [sub]"r"(sub_term)
+            : "cc"
+        );
+        return r;
+    }
+
     // Final reduction: given (sum_lo, sum_hi, carries), compute
     //   r = sum_lo + (sum_hi + carries) * EPSILON  (mod 2^64, with wrap-fix)
     // Result is non-canonical [0, 2^64).
