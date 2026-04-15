@@ -70,31 +70,29 @@ template <> struct GLSimd<Neon> {
         return vandq_u64(a, b);
     }
 
-    // Arithmetic (mirrors AVX2 algorithm: shift-canon, add, carry-fix, unshift)
-    //
-    // Why signed compare on a_sc (already-shifted) and c0_s (also shifted)?
-    // When a_sc + b wraps past 2^64, the wrap flips the MSB of c0_s, making
-    // c0_s signed-less than a_sc. Signed cmp on the shifted values detects
-    // this wrap precisely. (Same trick as AVX2 add_avx_a_sc.)
+    // Phase 1d: simplified add/sub using direct unsigned comparison (vcgtq_u64,
+    // available in ARMv8). Saves ~3 NEON ops per add vs the shifted-canonical
+    // trick that AVX2 needs for its signed-only 64-bit comparison.
+    // Matches scalar Goldilocks::add bit-for-bit (both produce non-canonical
+    // output in [0, 2^64)).
     static inline __attribute__((always_inline)) Vec add(Vec a, Vec b) {
-        Vec a_s  = shift(a);
-        Vec a_sc = toCanonical_s(a_s);
-        Vec c0_s = vaddq_u64(a_sc, b);
-        Vec mask = cmpgt_biased(a_sc, c0_s);       // signed cmp on shifted values
-        Vec corr = vandq_u64(mask, P_n);
-        Vec c_s  = vaddq_u64(c0_s, corr);
-        return shift(c_s);
+        Vec r = vaddq_u64(a, b);
+        Vec wrap1 = vcgtq_u64(a, r);               // r wrapped iff r < a
+        Vec corr1 = vandq_u64(wrap1, P_n);
+        r = vaddq_u64(r, corr1);
+        Vec wrap2 = vcgtq_u64(corr1, r);           // rare second wrap
+        Vec corr2 = vandq_u64(wrap2, P_n);
+        return vaddq_u64(r, corr2);
     }
-    // Mirrors AVX2 sub_avx: works in shifted domain; MSB cancels in
-    // (a_s - b_sc) so the result is unshifted; add P on borrow for mod-p.
     static inline __attribute__((always_inline)) Vec sub(Vec a, Vec b) {
-        Vec a_s  = shift(a);
-        Vec b_s  = shift(b);
-        Vec b_sc = toCanonical_s(b_s);             // shifted-canonical b
-        Vec c0   = vsubq_u64(a_s, b_sc);           // a - b_c (MSB cancels; may underflow)
-        Vec mask = cmpgt_biased(b_sc, a_s);        // b_sc > a_s signed ⇔ borrow
-        Vec corr = vandq_u64(mask, P);
-        return vaddq_u64(c0, corr);
+        Vec r = vsubq_u64(a, b);
+        Vec borrow1 = vcgtq_u64(r, a);             // borrow iff r > a unsigned
+        Vec corr1 = vandq_u64(borrow1, P_n);
+        Vec prev = r;
+        r = vsubq_u64(r, corr1);
+        Vec borrow2 = vcgtq_u64(r, prev);          // rare second underflow
+        Vec corr2 = vandq_u64(borrow2, P_n);
+        return vsubq_u64(r, corr2);
     }
     static inline __attribute__((always_inline)) Vec add_small(Vec a, Vec b) {
         // b assumed in [0, 2^32): c0_s cannot wrap (a_sc < 2^64 - 2^32).
