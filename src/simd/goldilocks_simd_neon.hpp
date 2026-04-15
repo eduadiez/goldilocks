@@ -247,6 +247,63 @@ template <> struct GLSimd<Neon> {
         return s3 + pos_cq - neg_cq;
     }
 
+    // Phase 1m: bulk-accumulate helper for mvp.
+    // Computes: (a * m)_lo + (a * m)_hi into running sums, without per-step
+    // reduction. Caller tracks carries separately and applies the combined
+    // reduction once per output position at the end of the 12-element inner
+    // loop. Saves ~2 ops per mul vs mul_small_reduced + add.
+    //
+    // Math: each product a_j * m_j yields (lo_j, hi_j) with hi_j ≤ 41.
+    //   SL_true = Σ lo_j  (may exceed 2^64; tracked as sum_lo + carries*2^64)
+    //   SH      = Σ hi_j  (< 12*41 = 492, never overflows 64 bits)
+    //   Result = SL + SH * 2^64 ≡ sum_lo + (carries + SH) * EPSILON (mod p)
+    static inline __attribute__((always_inline)) void accumulate_small_pair(
+        uint64_t a0, uint64_t a1, uint64_t m,
+        uint64_t& sum_lo0, uint64_t& sum_hi0, uint64_t& carries0,
+        uint64_t& sum_lo1, uint64_t& sum_hi1, uint64_t& carries1)
+    {
+        uint64_t lo0, hi0, lo1, hi1;
+        asm(
+            "mul   %[lo0], %[a0], %[m]\n\t"
+            "mul   %[lo1], %[a1], %[m]\n\t"
+            "umulh %[hi0], %[a0], %[m]\n\t"
+            "umulh %[hi1], %[a1], %[m]\n\t"
+            "adds  %[slo0], %[slo0], %[lo0]\n\t"
+            "adc   %[c0],   %[c0],   xzr\n\t"
+            "add   %[shi0], %[shi0], %[hi0]\n\t"
+            "adds  %[slo1], %[slo1], %[lo1]\n\t"
+            "adc   %[c1],   %[c1],   xzr\n\t"
+            "add   %[shi1], %[shi1], %[hi1]\n\t"
+            : [lo0]"=&r"(lo0), [lo1]"=&r"(lo1),
+              [hi0]"=&r"(hi0), [hi1]"=&r"(hi1),
+              [slo0]"+&r"(sum_lo0), [shi0]"+&r"(sum_hi0), [c0]"+&r"(carries0),
+              [slo1]"+&r"(sum_lo1), [shi1]"+&r"(sum_hi1), [c1]"+&r"(carries1)
+            : [a0]"r"(a0), [a1]"r"(a1), [m]"r"(m)
+            : "cc"
+        );
+        (void)lo0; (void)lo1; (void)hi0; (void)hi1;
+    }
+
+    // Final reduction: given (sum_lo, sum_hi, carries), compute
+    //   r = sum_lo + (sum_hi + carries) * EPSILON  (mod 2^64, with wrap-fix)
+    // Result is non-canonical [0, 2^64).
+    static inline __attribute__((always_inline)) uint64_t finalize_small_sum(
+        uint64_t sum_lo, uint64_t sum_hi, uint64_t carries)
+    {
+        uint64_t total_hi = sum_hi + carries;              // < 492 + 12 = 504
+        uint64_t eps_term = (total_hi << 32) - total_hi;   // total_hi * EPSILON
+        uint64_t r, adj;
+        asm(
+            "adds  %[r], %[slo], %[et]\n\t"
+            "csetm %w[adj], cs\n\t"
+            "add   %[r], %[r], %[adj]\n\t"
+            : [r]"=&r"(r), [adj]"=&r"(adj)
+            : [slo]"r"(sum_lo), [et]"r"(eps_term)
+            : "cc"
+        );
+        return r;
+    }
+
     // Phase 1l: mul_small — Goldilocks multiplication when one operand is known
     // to fit in [0, 2^32). Poseidon's MDS matrix entries are all ≤ 41, so this
     // is heavily used inside mvp_neon/mvp_neon_2.

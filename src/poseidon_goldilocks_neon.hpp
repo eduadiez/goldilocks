@@ -63,14 +63,37 @@ inline void PoseidonGoldilocks::mvp_neon(Goldilocks::Element *state,
     for (int i = 0; i < 6; ++i) out[i] = N::splat(0);
 
     if (mat_is_small) {
-        // Fast path: every mat[j][k] fits in 32 bits (Poseidon M).
-        for (int j = 0; j < SPONGE_WIDTH; ++j) {
-            uint64x2_t bc = N::splat(old_state[j].fe);
-            for (int i = 0; i < 6; ++i) {
+        // Phase 1m: bulk-reduce for single-hash mvp. Same idea as mvp_neon_2:
+        // accumulate raw partials, reduce once. Uses the dual-lane helper even
+        // for single-hash (both lanes carry the same state value so both compute
+        // the same result — redundant but avoids a separate code path).
+        for (int i = 0; i < 6; ++i) {
+            uint64_t sum_lo0 = 0, sum_hi0 = 0, carries0 = 0;
+            uint64_t sum_lo1 = 0, sum_hi1 = 0, carries1 = 0;
+            for (int j = 0; j < SPONGE_WIDTH; ++j) {
+                uint64_t a = old_state[j].fe;
                 uint64_t m0 = mat[j][i * 2].fe;
                 uint64_t m1 = mat[j][i * 2 + 1].fe;
-                out[i] = N::add(out[i], N::mul_small_reduced(bc, m0, m1));
+                // Use m0 for lane 0, m1 for lane 1. Can't use the pair helper
+                // because it assumes same m for both; fall back to two
+                // single-lane accumulations inline.
+                uint64_t lo0 = a * m0;
+                uint64_t lo1 = a * m1;
+                uint64_t hi0 = (uint64_t)(((__uint128_t)a * m0) >> 64);
+                uint64_t hi1 = (uint64_t)(((__uint128_t)a * m1) >> 64);
+                uint64_t new_lo0 = sum_lo0 + lo0;
+                carries0 += (new_lo0 < sum_lo0) ? 1 : 0;
+                sum_lo0 = new_lo0;
+                sum_hi0 += hi0;
+                uint64_t new_lo1 = sum_lo1 + lo1;
+                carries1 += (new_lo1 < sum_lo1) ? 1 : 0;
+                sum_lo1 = new_lo1;
+                sum_hi1 += hi1;
             }
+            uint64_t r0 = N::finalize_small_sum(sum_lo0, sum_hi0, carries0);
+            uint64_t r1 = N::finalize_small_sum(sum_lo1, sum_hi1, carries1);
+            uint64_t tmp[2] = {r0, r1};
+            out[i] = vld1q_u64(tmp);
         }
     } else {
         // General path: mat entries can be full 64-bit (Poseidon P).
@@ -97,14 +120,26 @@ inline void PoseidonGoldilocks::mvp_neon_2(uint64x2_t st[12],
     for (int k = 0; k < 12; ++k) old[k] = st[k];
 
     if (mat_is_small) {
-        // Fast path: MDS entries fit in 32 bits.
+        // Phase 1m: bulk-reduce — accumulate raw partial products, reduce once
+        // per output. Saves ~2 ops per mul_small-equivalent iteration.
+        uint64_t s0[12], s1[12];
         for (int k = 0; k < 12; ++k) {
-            uint64x2_t acc = N::splat(0);
+            s0[k] = vgetq_lane_u64(old[k], 0);
+            s1[k] = vgetq_lane_u64(old[k], 1);
+        }
+        for (int k = 0; k < 12; ++k) {
+            uint64_t sum_lo0 = 0, sum_hi0 = 0, carries0 = 0;
+            uint64_t sum_lo1 = 0, sum_hi1 = 0, carries1 = 0;
             for (int j = 0; j < 12; ++j) {
                 uint64_t m = mat[j][k].fe;
-                acc = N::add(acc, N::mul_small_reduced(old[j], m, m));
+                N::accumulate_small_pair(s0[j], s1[j], m,
+                    sum_lo0, sum_hi0, carries0,
+                    sum_lo1, sum_hi1, carries1);
             }
-            st[k] = acc;
+            uint64_t r0 = N::finalize_small_sum(sum_lo0, sum_hi0, carries0);
+            uint64_t r1 = N::finalize_small_sum(sum_lo1, sum_hi1, carries1);
+            uint64_t tmp[2] = {r0, r1};
+            st[k] = vld1q_u64(tmp);
         }
     } else {
         // General path (used once per hash for P matrix).
