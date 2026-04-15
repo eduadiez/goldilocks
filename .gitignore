@@ -9,6 +9,9 @@ testcpu
 benchcpu
 benchgpu
 deviceQuery
+check_neon_mul
+check_neon_mul_bench
+check_simd_traits_compile
 *.o
 
 # Editor / tooling artifacts

@@ -129,8 +129,32 @@ benchgpu: $(BUILD_DIR_GPU)/benchs/bench.cpp.o $(BUILD_DIR)/src/goldilocks_base_f
 runbenchcpu: benchcpu
 	./benchcpu --benchmark_filter=MERKLETREE_BENCH_AVX
 
+runbenchcpu_neon: benchcpu
+	./benchcpu --benchmark_filter='_NEON'
+
 runbenchgpu: benchgpu
 	./benchgpu --benchmark_filter=MERKLETREE_BENCH_CUDA
+
+# Standalone NEON mul fuzz harness (Phase 1 Part 2 verification)
+check_neon_mul: tests/check_neon_mul.cpp src/goldilocks_base_field.cpp
+	$(CXX) -std=c++17 $^ $(GMP_FLAGS) -lgmp -O2 -o $@
+
+runcheck_neon_mul: check_neon_mul
+	./check_neon_mul
+
+# Throughput microbenchmark for NEON mul
+check_neon_mul_bench: benchs/check_neon_mul_bench.cpp src/goldilocks_base_field.cpp
+	$(CXX) -std=c++17 $^ $(GMP_FLAGS) -lgmp -O3 -o $@
+
+runcheck_neon_mul_bench: check_neon_mul_bench
+	./check_neon_mul_bench
+
+# SIMD traits smoke test (Part 1 verification)
+check_simd_traits_compile: tests/check_simd_traits_compile.cpp src/goldilocks_base_field.cpp
+	$(CXX) -std=c++17 $^ $(GMP_FLAGS) -lgmp -O2 -o $@
+
+runcheck_simd_traits: check_simd_traits_compile
+	./check_simd_traits_compile
 
 clean:
 	$(RM) -r $(BUILD_DIR)
@@ -141,6 +165,9 @@ clean:
 	$(RM) testgpu
 	$(RM) benchcpu
 	$(RM) benchgpu
+	$(RM) check_neon_mul
+	$(RM) check_neon_mul_bench
+	$(RM) check_simd_traits_compile
 
 
 -include $(DEPS)

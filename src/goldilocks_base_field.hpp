@@ -13,6 +13,9 @@
 #ifdef GOLDILOCKS_ARCH_X86_64
 #include <immintrin.h>
 #endif
+#ifdef GOLDILOCKS_HAS_NEON
+#include <arm_neon.h>
+#endif
 
 
 #define USE_MONTGOMERY 0
@@ -167,6 +170,18 @@ public:
     static void mul_batch(Element *result, const Element *in1, const Element *in2, uint64_t offset1, uint64_t offset2);
     static void mul_batch(Element *result, const Element in1, const Element *in2, uint64_t offset2);
     static void mul_batch(Element *result, const Element *in1, const Element *in2, const uint64_t offsets1[4], const uint64_t offsets2[4]);
+
+    /*
+        NEON operations (ARM64 only)
+    */
+#ifdef GOLDILOCKS_HAS_NEON
+    static inline void load_neon(uint64x2_t &a, const Goldilocks::Element *p);
+    static inline void store_neon(Goldilocks::Element *p, const uint64x2_t &a);
+    static inline void add_neon(uint64x2_t &c, const uint64x2_t &a, const uint64x2_t &b);
+    static inline void sub_neon(uint64x2_t &c, const uint64x2_t &a, const uint64x2_t &b);
+    static inline void mult_neon(uint64x2_t &c, const uint64x2_t &a, const uint64x2_t &b);
+    static inline void square_neon(uint64x2_t &c, const uint64x2_t &a);
+#endif // GOLDILOCKS_HAS_NEON
 
     /*
         AVX operations
@@ -454,5 +469,11 @@ inline Goldilocks::Element operator+(const Goldilocks::Element &in1) { return in
 #ifdef __AVX512__
 #include "goldilocks_base_field_avx512.hpp"
 #endif
+
+// SIMD traits layer (Architect B, Phase 1). Header-only; no behavior change
+// for existing call sites. Templated consumers (Poseidon, cubic ext) opt in
+// by consuming GLSimd<B> primitives; legacy *_avx.hpp path is unaffected.
+// The umbrella defines the Goldilocks::*_neon public wrappers (ARM64 only).
+#include "simd/goldilocks_simd.hpp"
 
 #endif // GOLDILOCKS_BASE

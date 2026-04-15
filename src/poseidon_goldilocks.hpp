@@ -35,6 +35,11 @@ private:
     inline void static add_avx_small(__m256i &st0, __m256i &st1, __m256i &st2, const Goldilocks::Element C[SPONGE_WIDTH]);
 #endif // GOLDILOCKS_HAS_AVX2
 
+#ifdef GOLDILOCKS_HAS_NEON
+    inline void static add_neon(uint64x2_t st[6], const Goldilocks::Element C[SPONGE_WIDTH]);
+    inline void static pow7_neon(uint64x2_t st[6]);
+#endif // GOLDILOCKS_HAS_NEON
+
 #ifdef __AVX512__
     inline void static pow7_avx512(__m512i &st0, __m512i &st1, __m512i &st2);
     inline void static add_avx512(__m512i &st0, __m512i &st1, __m512i &st2, const Goldilocks::Element C[SPONGE_WIDTH]);
@@ -65,6 +70,14 @@ public:
     void static merkletree_batch_avx(Goldilocks::Element *tree, Goldilocks::Element *input, uint64_t num_cols, uint64_t num_rows, uint64_t batch_size, int nThreads = 0, uint64_t dim = 1);
 #endif // GOLDILOCKS_HAS_AVX2
 
+#ifdef GOLDILOCKS_HAS_NEON
+    void static hash_full_result_neon(Goldilocks::Element *, const Goldilocks::Element *);
+    inline void static hash_neon(Goldilocks::Element (&state)[CAPACITY], const Goldilocks::Element (&input)[SPONGE_WIDTH]);
+    void static linear_hash_neon(Goldilocks::Element *output, Goldilocks::Element *input, uint64_t size);
+    void static merkletree_neon(Goldilocks::Element *tree, Goldilocks::Element *input, uint64_t num_cols, uint64_t num_rows, int nThreads = 0, uint64_t dim = 1);
+    void static merkletree_batch_neon(Goldilocks::Element *tree, Goldilocks::Element *input, uint64_t num_cols, uint64_t num_rows, uint64_t batch_size, int nThreads = 0, uint64_t dim = 1);
+#endif // GOLDILOCKS_HAS_NEON
+
 #ifdef __AVX512__
     // Vectorized AVX512:
     void static hash_full_result_avx512(Goldilocks::Element *, const Goldilocks::Element *);
@@ -91,6 +104,8 @@ inline void PoseidonGoldilocks::merkletree(Goldilocks::Element *tree, Goldilocks
     merkletree_avx512(tree, input, num_cols, num_rows, nThreads, dim);
 #elif defined(GOLDILOCKS_HAS_AVX2)
     merkletree_avx(tree, input, num_cols, num_rows, nThreads, dim);
+#elif defined(GOLDILOCKS_HAS_NEON)
+    merkletree_neon(tree, input, num_cols, num_rows, nThreads, dim);
 #else
     merkletree_seq(tree, input, num_cols, num_rows, nThreads, dim);
 #endif
@@ -101,6 +116,8 @@ inline void PoseidonGoldilocks::merkletree_batch(Goldilocks::Element *tree, Gold
     merkletree_batch_avx512(tree, input, num_cols, num_rows, batch_size, nThreads, dim);
 #elif defined(GOLDILOCKS_HAS_AVX2)
     merkletree_batch_avx(tree, input, num_cols, num_rows, batch_size, nThreads, dim);
+#elif defined(GOLDILOCKS_HAS_NEON)
+    merkletree_batch_neon(tree, input, num_cols, num_rows, batch_size, nThreads, dim);
 #else
     merkletree_batch_seq(tree, input, num_cols, num_rows, batch_size, nThreads, dim);
 #endif
@@ -188,6 +205,10 @@ inline void PoseidonGoldilocks::hash_seq(Goldilocks::Element (&state)[CAPACITY],
 
 #ifdef GOLDILOCKS_HAS_AVX2
 #include "poseidon_goldilocks_avx.hpp"
+#endif
+
+#ifdef GOLDILOCKS_HAS_NEON
+#include "poseidon_goldilocks_neon.hpp"
 #endif
 
 #ifdef __AVX512__

@@ -27,6 +27,95 @@ public:
 #ifdef GOLDILOCKS_HAS_AVX512
     typedef __m512i Element_avx512[FIELD_EXTENSION];
 #endif
+#ifdef GOLDILOCKS_HAS_NEON
+    typedef uint64x2_t Element_neon[FIELD_EXTENSION];
+#endif
+
+#ifdef GOLDILOCKS_HAS_NEON
+public:
+    static inline void copy_neon(Goldilocks::Element *dst, const uint64x2_t a0_, const uint64x2_t a1_, const uint64x2_t a2_);
+    static inline void add_neon(Goldilocks::Element *result, const Goldilocks::Element *a, const Goldilocks::Element *b);
+    static inline void add_neon(Goldilocks::Element *result, const Goldilocks::Element *a, const Goldilocks::Element *b, uint64_t stride_a, uint64_t stride_b);
+    static inline void add31_neon(Goldilocks::Element *result, Goldilocks::Element *a, const Goldilocks::Element *b, uint64_t stride_a, uint64_t stride_b);
+    static inline void add13_neon(Goldilocks::Element *result, Goldilocks::Element *a, const Goldilocks::Element *b);
+    static inline void add1c3c_neon(Goldilocks::Element *result, const Goldilocks::Element a, const Goldilocks::Element *b);
+    static inline void add13c_neon(Goldilocks::Element *result, const Goldilocks::Element *a, const Goldilocks::Element *b);
+    static inline void add13_neon(Goldilocks::Element *result, const Goldilocks::Element *a, const Goldilocks::Element *b, uint64_t offset_a, uint64_t offset_b);
+    static inline void add13c_neon(Goldilocks::Element *result, const Goldilocks::Element *a, const Goldilocks::Element *b, uint64_t offset_a);
+    static inline void add33c_neon(Goldilocks::Element *result, const Goldilocks::Element *a, const Goldilocks::Element *b);
+    static inline void add33c_neon(Goldilocks::Element *result, Goldilocks::Element *a, Goldilocks::Element *b, uint64_t stride_a);
+    static inline void add13_neon(Goldilocks::Element *result, const uint64x2_t &a_, const Goldilocks::Element *b);
+    static inline void add13c_neon(Goldilocks::Element *result, const uint64x2_t &a_, const Goldilocks::Element *b);
+    static inline void add13_neon(Goldilocks3::Element_neon c_, const uint64x2_t &a_, Goldilocks3::Element_neon b_);
+    static inline void add13c_neon(Goldilocks3::Element_neon c_, const uint64x2_t &a_, const Goldilocks::Element *b);
+    static inline void add1c3c_neon(Goldilocks3::Element_neon c_, const Goldilocks::Element a, const Goldilocks::Element *b);
+    static inline void add13_neon(Goldilocks3::Element_neon c_, const Goldilocks::Element *a, Goldilocks3::Element_neon b_, uint64_t offset_a);
+    static inline void add13c_neon(Goldilocks3::Element_neon c_, const Goldilocks::Element *a, const Goldilocks::Element *b, uint64_t offset_a);
+    static inline void add_neon(Goldilocks3::Element_neon c_, Goldilocks3::Element_neon a_, Goldilocks3::Element_neon b_);
+    static inline void add33c_neon(Goldilocks3::Element_neon c_, Goldilocks3::Element_neon a_, const Goldilocks::Element *b);
+    static inline void add_neon(Goldilocks3::Element_neon c_, const Goldilocks::Element *a, Goldilocks3::Element_neon b_, uint64_t stride_a);
+    static inline void add33c_neon(Goldilocks3::Element_neon c_, Goldilocks::Element *a, Goldilocks::Element *b, uint64_t stride_a);
+    static inline void add13_neon(Goldilocks::Element *c, uint64_t stride_c, const uint64x2_t &a_, Goldilocks3::Element_neon b_);
+    static inline void add_neon(Goldilocks::Element *c, uint64_t stride_c, const Goldilocks::Element *a, Goldilocks3::Element_neon b_, uint64_t stride_a);
+    static inline void add_neon(Goldilocks::Element *c, uint64_t stride_c, Goldilocks3::Element_neon a_, Goldilocks3::Element_neon b_);
+    static inline void add33c_neon(Goldilocks::Element *c, uint64_t stride_c, Goldilocks3::Element_neon a_, const Goldilocks::Element *b);
+    static inline void add13_neon(Goldilocks::Element *c, uint64_t stride_c[2], const uint64x2_t &a_, Goldilocks3::Element_neon b_);
+    static inline void add_neon(Goldilocks::Element *c, uint64_t stride_c[2], const Goldilocks::Element *a, Goldilocks3::Element_neon b_, uint64_t stride_a);
+    static inline void add33c_neon(Goldilocks::Element *c, uint64_t stride_c[2], Goldilocks3::Element_neon a_, const Goldilocks::Element *b);
+    static inline void add_neon(uint64x2_t &c0_, uint64x2_t &c1_, uint64x2_t &c2_, const uint64x2_t a0_, const uint64x2_t a1_, const uint64x2_t a2_, const uint64x2_t b0_, const uint64x2_t b1_, const uint64x2_t b2_);
+    static inline void add_neon(uint64x2_t &c0_, uint64x2_t &c1_, uint64x2_t &c2_, const uint64x2_t a0_, const uint64x2_t a1_, const uint64x2_t a2_, const Goldilocks::Element *b, uint64_t stride);
+    static inline void add31_neon(uint64x2_t &c0_, uint64x2_t &c1_, uint64x2_t &c2_, uint64x2_t a0_, const uint64x2_t a1_, const uint64x2_t a2_, const Goldilocks::Element *b, uint64_t stride);
+    static inline void sub33c_neon(Goldilocks::Element *result, Goldilocks::Element *a, Goldilocks::Element *b, uint64_t stride_a);
+    static inline void sub31_neon(Goldilocks::Element *result, Goldilocks::Element *a, Goldilocks::Element *b, uint64_t stride_a, uint32_t stride_b);
+    static inline void sub31c_neon(Goldilocks::Element *result, Goldilocks::Element *a, Goldilocks::Element b, uint64_t stride_a);
+    static inline void sub_neon(Goldilocks::Element *result, Goldilocks::Element *a, Goldilocks::Element *b);
+    static inline void sub33c_neon(Goldilocks::Element *result, Goldilocks::Element *a, Goldilocks::Element *b);
+    static inline void sub_neon(Goldilocks::Element *result, Goldilocks::Element *a, Goldilocks::Element *b, uint64_t stride_a, uint64_t stride_b);
+    static inline void sub31c_neon(Goldilocks3::Element_neon &c_, Goldilocks::Element *a, Goldilocks::Element b, const uint64_t stride_a[2]);
+    static inline void sub31c_neon(Goldilocks3::Element_neon &c_, Goldilocks::Element *a, Goldilocks::Element b, uint64_t stride_a);
+    static inline void sub_neon(Goldilocks3::Element_neon &c_, Goldilocks3::Element_neon a_, Goldilocks3::Element_neon b_);
+    static inline void sub33c_neon(Goldilocks3::Element_neon &c_, Goldilocks3::Element_neon a_, Goldilocks::Element *b);
+    static inline void sub33c_neon(Goldilocks::Element *c, uint64_t stride_c, Goldilocks3::Element_neon a_, Goldilocks3::Element_neon b_);
+    static inline void sub_neon(Goldilocks3::Element_neon &c_, Goldilocks3::Element_neon a_, Goldilocks::Element *b, uint64_t stride_b);
+    static inline void sub33c_neon(Goldilocks3::Element_neon &c_, Goldilocks::Element *a, Goldilocks::Element *b, uint64_t stride_a);
+    static inline void sub13c_neon(uint64x2_t &c0_, uint64x2_t &c1_, uint64x2_t &c2_, Goldilocks::Element *a, Goldilocks::Element *b, uint64_t stride_a);
+    static inline void sub33c_neon(uint64x2_t &c0_, uint64x2_t &c1_, uint64x2_t &c2_, Goldilocks::Element *a, Goldilocks::Element *b, uint64_t stride_a);
+    static inline void mul13c_neon(Goldilocks::Element *result, Goldilocks::Element *a, Element &b, uint64_t stride_a);
+    static inline void mul1c3c_neon(Goldilocks::Element *result, Goldilocks::Element a, Element &b);
+    static inline void mul13c_neon(Goldilocks::Element *result, Goldilocks::Element *a, Element &b, const uint64_t stride_a[2]);
+    static inline void mul_neon(Goldilocks::Element *result, Goldilocks::Element *a, Goldilocks::Element *b);
+    static inline void mul33c_neon(Goldilocks::Element *result, Goldilocks::Element *a, Goldilocks::Element *b);
+    static inline void mul_neon(Goldilocks::Element *result, Goldilocks::Element *a, Goldilocks::Element *b, uint64_t stride_a, uint64_t stride_b);
+    static inline void mul_neon(Goldilocks::Element *result, Goldilocks::Element *a, Goldilocks::Element *b, const uint64_t stride_a[2], const uint64_t stride_b[2]);
+    static inline void mul33c_neon(Goldilocks::Element *result, Goldilocks::Element *a, Goldilocks::Element *b, uint64_t stride_a);
+    static inline void mul33c_neon(Goldilocks::Element *result, Goldilocks::Element *a, Goldilocks::Element *b, const uint64_t stride_a[2]);
+    static inline void mul13c_neon(Goldilocks::Element *result, Goldilocks::Element *a, Goldilocks::Element *b);
+    static inline void mul13_neon(Goldilocks::Element *result, Goldilocks::Element *a, Goldilocks::Element *b, uint64_t stride_a, uint64_t stride_b);
+    static inline void mul13_neon(Goldilocks::Element *result, Goldilocks::Element *a, Goldilocks::Element *b, const uint64_t stride_a[2], const uint64_t stride_b[2]);
+    static inline void mul13c_neon(Goldilocks::Element *result, const uint64x2_t &a_, Goldilocks::Element *b);
+    static inline void mul13_neon(Goldilocks::Element *result, const uint64x2_t &a_, Goldilocks::Element *b);
+    static inline void mul13c_neon(Goldilocks3::Element_neon &c_, const uint64x2_t &a_, Goldilocks::Element *b);
+    static inline void mul13_neon(Goldilocks3::Element_neon &c_, const uint64x2_t &a_, const Goldilocks3::Element_neon &b_);
+    static inline void mul13_neon(Goldilocks3::Element_neon &c_, Goldilocks::Element *a, Goldilocks3::Element_neon b_, uint64_t stride_a);
+    static inline void mul13c_neon(Goldilocks3::Element_neon &c_, Goldilocks::Element *a, Goldilocks::Element *b, uint64_t stride_a);
+    static inline void mul13c_neon(Goldilocks3::Element_neon &c_, Goldilocks::Element *a, Goldilocks::Element *b, const uint64_t stride_a[2]);
+    static inline void mul13_neon(Goldilocks3::Element_neon &c_, Goldilocks::Element *a, Goldilocks3::Element_neon b_, const uint64_t stride_a[2]);
+    static inline void mul1c3c_neon(Goldilocks3::Element_neon &c_, Goldilocks::Element a, Element &b);
+    static inline void mul33c_neon(Goldilocks3::Element_neon &c_, Goldilocks3::Element_neon &a_, Goldilocks::Element *b);
+    static inline void mul_neon(Goldilocks3::Element_neon &c_, Goldilocks3::Element_neon &a_, Goldilocks3::Element_neon &b_);
+    static inline void mul_neon(Goldilocks::Element *c, uint64_t stride_c, Goldilocks::Element *a, Goldilocks3::Element_neon &b_, uint64_t stride_a);
+    static inline void mul_neon(Goldilocks::Element *c, uint64_t stride_c, Goldilocks3::Element_neon &a_, Goldilocks3::Element_neon &b_);
+    static inline void mul_neon(Goldilocks::Element *c, uint64_t stride_c[2], Goldilocks3::Element_neon &a_, Goldilocks3::Element_neon &b_);
+    static inline void mul_neon(Goldilocks3::Element_neon &c_, Goldilocks::Element *a, Goldilocks::Element *b, uint64_t stride_a, uint64_t stride_b);
+    static inline void mul33c_neon(Goldilocks3::Element_neon &c_, Goldilocks::Element *a, Goldilocks::Element *b, uint64_t stride_a);
+    static inline void mul33c_neon(Goldilocks3::Element_neon &c_, Goldilocks::Element *a, Goldilocks::Element *b, const uint64_t stride_a[2]);
+    static inline void mul_neon(Goldilocks3::Element_neon &c_, Goldilocks::Element *a, Goldilocks3::Element_neon &b_, const uint64_t stride_a[2]);
+    static inline void mul_neon(Goldilocks3::Element_neon &c_, Goldilocks::Element *a, Goldilocks3::Element_neon &b_, const uint64_t stride_a);
+    static inline void mul_neon(Goldilocks3::Element_neon &c_, Goldilocks::Element *a, Goldilocks::Element *b, const uint64_t stride_a[2], const uint64_t stride_b[2]);
+    static inline void mul13c_neon(uint64x2_t &c0_, uint64x2_t &c1_, uint64x2_t &c2_, Goldilocks::Element *a, Element &b, uint64_t stride_a);
+    static inline void mul_neon(uint64x2_t &c0_, uint64x2_t &c1_, uint64x2_t &c2_, uint64x2_t a0_, uint64x2_t a1_, uint64x2_t a2_, uint64x2_t b0_, uint64x2_t b1_, uint64x2_t b2_, uint64x2_t aux0_, uint64x2_t aux1_, uint64x2_t aux2_);
+    static inline void mul_neon(uint64x2_t &c0_, uint64x2_t &c1_, uint64x2_t &c2_, uint64x2_t a0_, uint64x2_t a1_, uint64x2_t a2_, Goldilocks::Element *b);
+#endif // GOLDILOCKS_HAS_NEON
 
 private:
     static const Element ZERO;
@@ -4405,5 +4494,9 @@ public:
         std::memcpy(res, &aux[0], size * sizeof(Goldilocks3::Element));
     }
 };
+
+#ifdef GOLDILOCKS_HAS_NEON
+#include "goldilocks_cubic_extension_neon.hpp"
+#endif
 
 #endif // GOLDILOCKS_F3
