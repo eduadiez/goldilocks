@@ -90,7 +90,39 @@ void NTT_Goldilocks::NTT_iters(Goldilocks::Element *dst, Goldilocks::Element *sr
                 u_int64_t mdiv2 = m >> 1;
                 u_int64_t mdiv2i = 1 << si;
                 u_int64_t mi = mdiv2i * 2;
-                for (u_int64_t i = 0; i < (batchSize >> 1); i++)
+                u_int64_t i = 0;
+#ifdef GOLDILOCKS_HAS_NEON
+                // Phase 2b: ncols == 1 path — vectorize across 2 butterflies (different twiddles).
+                // Valid for mdiv2i >= 2 because consecutive i's with even starting i stay in the
+                // same mdiv2i group, giving consecutive memory offsets for (of1, of2) pairs.
+                if (ncols == 1 && mdiv2i >= 2) {
+                    using N = goldilocks::simd::GLSimd<goldilocks::simd::Neon>;
+                    for (; i + 1 < (batchSize >> 1); i += 2) {
+                        u_int64_t ki = b * batchSize + (i / mdiv2i) * mi;
+                        u_int64_t ji = i % mdiv2i;
+                        u_int64_t of1 = ki + ji + mdiv2i;
+                        u_int64_t of2 = ki + ji;
+
+                        u_int64_t j0 = (b * batchSize / 2 + i);
+                        j0 = (j0 & rm) * rb + (j0 >> (re - rs));
+                        j0 = j0 % mdiv2;
+                        u_int64_t j1 = (b * batchSize / 2 + i + 1);
+                        j1 = (j1 & rm) * rb + (j1 >> (re - rs));
+                        j1 = j1 % mdiv2;
+
+                        Goldilocks::Element w0 = root(s + si, j0);
+                        Goldilocks::Element w1 = root(s + si, j1);
+                        uint64x2_t w_vec = N::set(w0.fe, w1.fe);
+
+                        uint64x2_t a_vec = N::load(&a[of1]);
+                        uint64x2_t u_vec = N::load(&a[of2]);
+                        uint64x2_t t_vec = N::mul(a_vec, w_vec);
+                        N::store(&a[of2], N::add(u_vec, t_vec));
+                        N::store(&a[of1], N::sub(u_vec, t_vec));
+                    }
+                }
+#endif
+                for (; i < (batchSize >> 1); i++)
                 {
                     u_int64_t ki = b * batchSize + (i / mdiv2i) * mi;
                     u_int64_t ji = i % mdiv2i;
@@ -105,8 +137,7 @@ void NTT_Goldilocks::NTT_iters(Goldilocks::Element *dst, Goldilocks::Element *sr
                     Goldilocks::Element w = root(s + si, j);
                     u_int64_t k = 0;
 #ifdef GOLDILOCKS_HAS_NEON
-                    // Phase 2a: NEON fast path — 2 butterflies per iter.
-                    // Fused mul+add/sub over 2 consecutive columns using our NEON primitives.
+                    // Phase 2a: NEON fast path — 2 butterflies per iter (multi-column).
                     using N = goldilocks::simd::GLSimd<goldilocks::simd::Neon>;
                     uint64x2_t w_vec = N::splat(w.fe);
                     for (; k + 1 < ncols; k += 2) {
