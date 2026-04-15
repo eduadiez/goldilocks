@@ -304,6 +304,38 @@ void metal_dispatch_merkle_leaves(MetalCtxHandle ctx,
     }
 }
 
+void metal_dispatch_merkle_leaves_simd(MetalCtxHandle ctx,
+                                        MetalBufHandle in_buf,
+                                        MetalBufHandle tree_buf,
+                                        uint32_t ncols,
+                                        uint32_t dim,
+                                        uint32_t num_rows) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        id<MTLComputePipelineState> pso =
+            (__bridge id<MTLComputePipelineState>)(
+                metal_context_pipeline(ctx, "merkle_leaves_simd"));
+
+        id<MTLCommandBuffer>        cmd = [impl->_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(in_buf)   offset:0 atIndex:0];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(tree_buf) offset:0 atIndex:1];
+        [enc setBytes:&ncols length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&dim   length:sizeof(uint32_t) atIndex:3];
+
+        // One simdgroup (32 threads on Apple M-series) per row.
+        NSUInteger tpg    = 32;
+        NSUInteger groups = (NSUInteger)num_rows;  // one group per row
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+}
+
 // ---------------------------------------------------------------------------
 // merkle_parents dispatch
 // ---------------------------------------------------------------------------

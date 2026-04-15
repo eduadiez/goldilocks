@@ -32,6 +32,11 @@
 #include "../../src/metal/metal_context.hpp"
 #include "../../src/metal/goldilocks_metal.hpp"
 
+// Opt-in switch: when set, merkletree_metal dispatches the SIMD-cooperative
+// leaf kernel instead of the one-thread-per-row kernel. Read from env var
+// GOLDILOCKS_METAL_COOP=1 by main().
+extern "C" { int g_merkle_use_simd_coop = 0; }
+
 #ifndef MTL_KERNEL_DIR
 #error "MTL_KERNEL_DIR must be defined (path to src/metal/kernels)"
 #endif
@@ -131,28 +136,41 @@ static void bench_one_size(uint64_t ncols, uint64_t nrows, int iters) {
     Result r_neon = { 0.0, 0 };
 #endif
 
+    // Metal, one-thread-per-row kernel (default)
+    g_merkle_use_simd_coop = 0;
     Result r_metal = time_run(
         [&]{ PoseidonGoldilocks::merkletree_metal(tree, cols, ncols, nrows); },
         tree, n_tree, iters);
 
-    // Bit-exact cross-check on root[0]
-    const char* check_seq_neon  = (r_seq.root0 == r_neon.root0) ? "match" : "DIVERGE";
+    // Metal, SIMD-group-cooperative kernel
+    g_merkle_use_simd_coop = 1;
+    Result r_coop = time_run(
+        [&]{ PoseidonGoldilocks::merkletree_metal(tree, cols, ncols, nrows); },
+        tree, n_tree, iters);
+    g_merkle_use_simd_coop = 0;
+
+    const char* check_seq_neon  = (r_seq.root0 == r_neon.root0)  ? "match" : "DIVERGE";
     const char* check_seq_metal = (r_seq.root0 == r_metal.root0) ? "match" : "DIVERGE";
+    const char* check_seq_coop  = (r_seq.root0 == r_coop.root0)  ? "match" : "DIVERGE";
 
     printf("\n=== Merkle  ncols=%llu  nrows=%llu  (iters=%d) ===\n",
            (unsigned long long)ncols, (unsigned long long)nrows, iters);
-    printf("  seq    : %10.3f ms\n", r_seq.ms);
+    printf("  seq          : %10.3f ms\n", r_seq.ms);
 #ifdef GOLDILOCKS_HAS_NEON
-    printf("  neon   : %10.3f ms   (%5.2fx vs seq,  check=%s)\n",
+    printf("  neon         : %10.3f ms   (%5.2fx vs seq,  check=%s)\n",
            r_neon.ms, r_seq.ms / r_neon.ms, check_seq_neon);
 #else
-    printf("  neon   : n/a (GOLDILOCKS_HAS_NEON not defined)\n");
+    printf("  neon         : n/a (GOLDILOCKS_HAS_NEON not defined)\n");
 #endif
-    printf("  metal  : %10.3f ms   (%5.2fx vs seq, %5.2fx vs neon, check=%s)\n",
+    printf("  metal (row)  : %10.3f ms   (%5.2fx vs neon, check=%s)\n",
            r_metal.ms,
-           r_seq.ms  / r_metal.ms,
            r_neon.ms > 0 ? r_neon.ms / r_metal.ms : 0.0,
            check_seq_metal);
+    printf("  metal (coop) : %10.3f ms   (%5.2fx vs neon, %5.2fx vs metal-row, check=%s)\n",
+           r_coop.ms,
+           r_neon.ms  > 0 ? r_neon.ms  / r_coop.ms : 0.0,
+           r_metal.ms > 0 ? r_metal.ms / r_coop.ms : 0.0,
+           check_seq_coop);
 
     delete[] cols;
     delete[] tree;

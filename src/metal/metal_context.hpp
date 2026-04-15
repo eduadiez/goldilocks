@@ -100,6 +100,18 @@ void metal_dispatch_merkle_leaves(MetalCtxHandle ctx,
                                    uint32_t dim,
                                    uint32_t num_rows);
 
+// merkle_leaves_simd: SIMD-group-cooperative variant. One simdgroup (32 lanes)
+// hashes ONE row; lanes 0..11 each own one Poseidon state element; MDS uses
+// `simd_shuffle`. Drastically lower per-thread register pressure than the
+// single-threaded version → higher occupancy on M-series GPUs.
+// Dispatch: num_rows threadgroups × 32 threads each.
+void metal_dispatch_merkle_leaves_simd(MetalCtxHandle ctx,
+                                        MetalBufHandle in_buf,
+                                        MetalBufHandle tree_buf,
+                                        uint32_t ncols,
+                                        uint32_t dim,
+                                        uint32_t num_rows);
+
 // merkle_parents: one thread per parent output node.
 //   buf       = full tree buffer  (buffer(0))
 //   nextIndex = flat element offset to start of children level  (buffer(1) constant)

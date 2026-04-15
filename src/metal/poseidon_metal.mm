@@ -30,6 +30,12 @@
 #include "metal_context.hpp"
 #include "goldilocks_metal.hpp"  // declares goldilocks_metal::merkletree_metal
 
+// A/B switch for leaf kernel. 0 = one-thread-per-row (default; shipped).
+// 1 = SIMD-cooperative (experimental, being A/B'd). Set via env var
+// GOLDILOCKS_METAL_COOP by `bench_merkle`, or left at 0 for normal callers.
+// Weak symbol so test harnesses can override without linker games.
+extern "C" { __attribute__((weak)) int g_merkle_use_simd_coop = 0; }
+
 // Constants mirroring poseidon_goldilocks.hpp / merklehash_goldilocks.hpp
 static constexpr uint32_t HASH_SIZE_ = 4;   // CAPACITY = HASH_SIZE = 4 elements
 static constexpr uint32_t RATE_      = 8;   // RATE = 8 elements
@@ -84,12 +90,21 @@ void merkletree_metal(Goldilocks::Element* tree,
         uint32_t dim32   = 1;
         uint32_t nrows32 = (uint32_t)num_rows;
 
-        metal_dispatch_merkle_leaves(ctx,
-                                      input_buf,
-                                      tree_buf,
-                                      ncols32,
-                                      dim32,
-                                      nrows32);
+        if (g_merkle_use_simd_coop) {
+            metal_dispatch_merkle_leaves_simd(ctx,
+                                              input_buf,
+                                              tree_buf,
+                                              ncols32,
+                                              dim32,
+                                              nrows32);
+        } else {
+            metal_dispatch_merkle_leaves(ctx,
+                                          input_buf,
+                                          tree_buf,
+                                          ncols32,
+                                          dim32,
+                                          nrows32);
+        }
 
         // -------------------------------------------------------------------
         // Phase 2: merkle_parents — one GPU dispatch per tree level.
