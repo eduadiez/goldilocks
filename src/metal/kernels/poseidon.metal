@@ -300,15 +300,18 @@ inline void linear_hash(thread ulong out[4],
         ulong tmp[12];
         for (int i = 0; i < 12; i++) tmp[i] = state[i];
         pod12(tmp);
-        // Canonicalize at sponge boundary
-        for (int i = 0; i < 12; i++) tmp[i] = gl_canonicalize(tmp[i]);
+        // NO canonicalize here — pod12 is mod-p correct on unreduced inputs
+        // up to [0, 2^64), so the sponge can carry lazy state across absorbs.
         // Save output (capacity = first 4 for next round)
         for (int i = 0; i < 4; i++) out[i] = tmp[i];
-        // Update state capacity for next iteration
         for (int i = 0; i < 4; i++) state[i] = out[i];
 
         remaining -= n;
     }
+    // Canonicalize only the final 4-element hash that the caller will write
+    // to device memory. Skips 12 × gl_canonicalize per absorb iteration
+    // (36 ops × 16 absorbs = 576 ops saved per row for ncols=128).
+    for (int i = 0; i < 4; i++) out[i] = gl_canonicalize(out[i]);
 }
 
 // ---- pod12_x2: 2-row-parallel Poseidon permutation -------------------------
@@ -495,9 +498,13 @@ kernel void merkle_leaves_x2(
 }
 
 // ---- kernel: merkle_leaves -------------------------------------------------
-// One thread per leaf row i.
+// One thread per leaf row i. Annotate with
+// [[max_total_threads_per_threadgroup(64)]] so the Metal compiler knows the
+// threadgroup size cap and can allocate more register budget per thread
+// (improves register-file occupancy for the register-hungry pod12 kernel).
 // Input:  inp[num_rows * ncols * dim]  (row-major, row i at inp[i*ncols*dim])
 // Output: tree[num_rows * 4]           (row i at tree[i*4])
+[[max_total_threads_per_threadgroup(64)]]
 kernel void merkle_leaves(
     device const ulong* inp   [[ buffer(0) ]],
     device       ulong* tree  [[ buffer(1) ]],
