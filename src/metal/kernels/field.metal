@@ -92,3 +92,33 @@ inline ulong gl_mul(ulong a, ulong b) {
 inline ulong gl_canonicalize(ulong a) {
     return (a >= GL_PRIME) ? (a - GL_PRIME) : a;
 }
+
+// gl_mul_small: multiply 64-bit x by a small constant k (k < 2^32),
+// result in [0, 2p) (same lazy contract as gl_mul).
+//
+// Since k < 2^32 and x < 2^64, the product x*k < 2^96 — no full 128-bit
+// reduction needed. Saves ~half the ops vs gl_mul for the common case of
+// multiplying by an MDS matrix entry (the Goldilocks Poseidon12 M and P
+// matrices contain only values < 0x30, well within 8 bits).
+//
+// Structure: decompose x into 32-bit halves (x_hi, x_lo), compute two
+// uint×uint → ulong widening products, assemble into 96-bit form as
+// (hi_32 * 2^64 + lo_64), then reduce using 2^64 ≡ CQ (mod p).
+inline ulong gl_mul_small(ulong x, uint k) {
+    uint  x_lo = (uint)(x & 0xFFFFFFFFu);
+    uint  x_hi = (uint)(x >> 32);
+    ulong p_lo = (ulong)x_lo * (ulong)k;   // native widening 32×32 → 64
+    ulong p_hi = (ulong)x_hi * (ulong)k;
+
+    // 96-bit product = (p_hi << 32) + p_lo, split into (hi_32, lo_64).
+    ulong lo_64 = p_lo + (p_hi << 32);
+    uint  carry = (lo_64 < p_lo) ? 1u : 0u;
+    uint  hi_32 = (uint)(p_hi >> 32) + carry;
+
+    // Reduce: 2^64 ≡ CQ (mod p). product mod p ≡ lo_64 + hi_32 * CQ.
+    // hi_32 * CQ fits in 64 bits (both < 2^32).
+    ulong hi_cq  = (ulong)hi_32 * GL_CQ;
+    ulong result = lo_64 + hi_cq;
+    if (result < lo_64) result += GL_CQ;    // single-step overflow fixup
+    return result;                          // in [0, 2p)
+}

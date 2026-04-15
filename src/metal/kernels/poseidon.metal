@@ -38,21 +38,26 @@ inline ulong pow7_elem(ulong x) {
 // Flat M_[144] is stored **column-major**: M_[col*12 + row] == M[row][col].
 // (Verified empirically: M_[0..11] = {0x19,0x0f,0x29,0x10,...} = column 0 of M.)
 // So M[j][i] maps to M_[i*12 + j].
-// No canonicalize — outputs are lazy-reduced sums of lazy-reduce mul products.
+//
+// Performance: the Goldilocks Poseidon12 M matrix has all entries < 0x30
+// (8 bits), well within the 32-bit range gl_mul_small expects. We downcast
+// the loaded 64-bit constant to uint and use the 96-bit-product reduction
+// instead of a full 128-bit one. ~2× faster per mul than gl_mul.
 inline void mvp_M(thread ulong st[12]) {
     ulong old[12];
     for (int i = 0; i < 12; i++) old[i] = st[i];
     for (int i = 0; i < 12; i++) {
-        ulong acc = gl_mul(old[0], M_[i * 12 + 0]);
+        ulong acc = gl_mul_small(old[0], (uint)M_[i * 12 + 0]);
         for (int j = 1; j < 12; j++) {
-            acc = gl_add(acc, gl_mul(old[j], M_[i * 12 + j]));
+            acc = gl_add(acc, gl_mul_small(old[j], (uint)M_[i * 12 + j]));
         }
         st[i] = acc;
     }
 }
 
 // mvp_P: identical layout but uses P_ matrix (also column-major in flat form).
-// Called exactly ONCE at the transition from initial full rounds to partial rounds.
+// Called exactly ONCE at the transition from initial full rounds to partial
+// rounds. Unlike M_, P_ has 132 of 144 entries > 2^32 — full gl_mul required.
 inline void mvp_P(thread ulong st[12]) {
     ulong old[12];
     for (int i = 0; i < 12; i++) old[i] = st[i];
@@ -299,6 +304,189 @@ inline void linear_hash(thread ulong out[4],
         for (int i = 0; i < 4; i++) state[i] = out[i];
 
         remaining -= n;
+    }
+}
+
+// ---- pod12_x2: 2-row-parallel Poseidon permutation -------------------------
+// Runs TWO independent pod12 states in lockstep in one thread. The compiler
+// can interleave non-data-dependent operations across the two states,
+// doubling instruction-level parallelism. Mirrors the CPU NEON 2-hash
+// strategy (`hash_full_result_neon_2` at poseidon_goldilocks.cpp:423),
+// which packs 2 hashes into NEON 128-bit lanes for the same reason.
+//
+// Register cost: ~2× vs pod12 (2 × 12 ulong state). Profiling shows the
+// row-per-thread kernel is NOT register-bound (PSO max=1024 threads),
+// so we have headroom to trade registers for ILP.
+
+inline void mvp_M_x2(thread ulong (&sa)[12], thread ulong (&sb)[12]) {
+    ulong oa[12], ob[12];
+    for (int i = 0; i < 12; i++) { oa[i] = sa[i]; ob[i] = sb[i]; }
+    for (int i = 0; i < 12; i++) {
+        ulong aa = gl_mul(oa[0], M_[i * 12 + 0]);
+        ulong bb = gl_mul(ob[0], M_[i * 12 + 0]);
+        #pragma unroll
+        for (int j = 1; j < 12; j++) {
+            ulong m_ij = M_[i * 12 + j];
+            aa = gl_add(aa, gl_mul(oa[j], m_ij));
+            bb = gl_add(bb, gl_mul(ob[j], m_ij));
+        }
+        sa[i] = aa; sb[i] = bb;
+    }
+}
+
+inline void mvp_P_x2(thread ulong (&sa)[12], thread ulong (&sb)[12]) {
+    ulong oa[12], ob[12];
+    for (int i = 0; i < 12; i++) { oa[i] = sa[i]; ob[i] = sb[i]; }
+    for (int i = 0; i < 12; i++) {
+        ulong aa = gl_mul(oa[0], P_[i * 12 + 0]);
+        ulong bb = gl_mul(ob[0], P_[i * 12 + 0]);
+        #pragma unroll
+        for (int j = 1; j < 12; j++) {
+            ulong p_ij = P_[i * 12 + j];
+            aa = gl_add(aa, gl_mul(oa[j], p_ij));
+            bb = gl_add(bb, gl_mul(ob[j], p_ij));
+        }
+        sa[i] = aa; sb[i] = bb;
+    }
+}
+
+inline void pod12_x2(thread ulong (&sa)[12], thread ulong (&sb)[12]) {
+    // Step 1
+    for (int i = 0; i < 12; i++) {
+        ulong c = C[i];
+        sa[i] = gl_add(sa[i], c);
+        sb[i] = gl_add(sb[i], c);
+    }
+    // Step 2 (3 full rounds)
+    #pragma unroll
+    for (int r = 0; r < 3; r++) {
+        for (int i = 0; i < 12; i++) { sa[i] = pow7_elem(sa[i]); sb[i] = pow7_elem(sb[i]); }
+        int base = (r + 1) * 12;
+        for (int i = 0; i < 12; i++) {
+            ulong c = C[base + i];
+            sa[i] = gl_add(sa[i], c);
+            sb[i] = gl_add(sb[i], c);
+        }
+        mvp_M_x2(sa, sb);
+    }
+    // Step 3 (transition)
+    for (int i = 0; i < 12; i++) { sa[i] = pow7_elem(sa[i]); sb[i] = pow7_elem(sb[i]); }
+    { int base = 4 * 12;
+      for (int i = 0; i < 12; i++) {
+          ulong c = C[base + i];
+          sa[i] = gl_add(sa[i], c);
+          sb[i] = gl_add(sb[i], c);
+      }
+    }
+    mvp_P_x2(sa, sb);
+    // Step 4 (22 partial rounds)
+    #pragma unroll
+    for (int r = 0; r < 22; r++) {
+        sa[0] = pow7_elem(sa[0]);  sb[0] = pow7_elem(sb[0]);
+        ulong cr = C[60 + r];
+        sa[0] = gl_add(sa[0], cr); sb[0] = gl_add(sb[0], cr);
+
+        int s_base = 23 * r;
+        ulong s0a = gl_mul(sa[0], S[s_base]);
+        ulong s0b = gl_mul(sb[0], S[s_base]);
+        #pragma unroll
+        for (int i = 1; i < 12; i++) {
+            ulong sv = S[s_base + i];
+            s0a = gl_add(s0a, gl_mul(sa[i], sv));
+            s0b = gl_add(s0b, gl_mul(sb[i], sv));
+        }
+        int s_base2 = 23 * r + 11;
+        #pragma unroll
+        for (int i = 1; i < 12; i++) {
+            ulong sv = S[s_base2 + i];
+            sa[i] = gl_add(sa[i], gl_mul(sa[0], sv));
+            sb[i] = gl_add(sb[i], gl_mul(sb[0], sv));
+        }
+        sa[0] = s0a; sb[0] = s0b;
+    }
+    // Step 5 (3 full rounds)
+    #pragma unroll
+    for (int r = 0; r < 3; r++) {
+        for (int i = 0; i < 12; i++) { sa[i] = pow7_elem(sa[i]); sb[i] = pow7_elem(sb[i]); }
+        int base = 82 + r * 12;
+        for (int i = 0; i < 12; i++) {
+            ulong c = C[base + i];
+            sa[i] = gl_add(sa[i], c);
+            sb[i] = gl_add(sb[i], c);
+        }
+        mvp_M_x2(sa, sb);
+    }
+    // Step 6 (final pow7 + mvp)
+    for (int i = 0; i < 12; i++) { sa[i] = pow7_elem(sa[i]); sb[i] = pow7_elem(sb[i]); }
+    mvp_M_x2(sa, sb);
+}
+
+inline void linear_hash_x2(thread ulong (&out_a)[4], thread ulong (&out_b)[4],
+                           const device ulong* inp_a, const device ulong* inp_b,
+                           uint size) {
+    if (size <= 4) {
+        for (uint i = 0; i < size; i++) { out_a[i] = inp_a[i]; out_b[i] = inp_b[i]; }
+        for (uint i = size; i < 4; i++) { out_a[i] = 0UL;      out_b[i] = 0UL;      }
+        return;
+    }
+    ulong sa[12], sb[12];
+    uint remaining = size;
+    bool first = true;
+    while (remaining > 0) {
+        if (first) {
+            for (int i = 8; i < 12; i++) { sa[i] = 0UL; sb[i] = 0UL; }
+            first = false;
+        } else {
+            for (int i = 0; i < 4; i++) { sa[8 + i] = out_a[i]; sb[8 + i] = out_b[i]; }
+        }
+        uint n = (remaining < 8) ? remaining : 8;
+        uint offset = size - remaining;
+        for (uint i = 0; i < n; i++) { sa[i] = inp_a[offset + i]; sb[i] = inp_b[offset + i]; }
+        for (uint i = n; i < 8; i++) { sa[i] = 0UL;               sb[i] = 0UL;               }
+        // Snapshot -> pod12 mutates in place
+        ulong ta[12], tb[12];
+        for (int i = 0; i < 12; i++) { ta[i] = sa[i]; tb[i] = sb[i]; }
+        pod12_x2(ta, tb);
+        for (int i = 0; i < 12; i++) { ta[i] = gl_canonicalize(ta[i]); tb[i] = gl_canonicalize(tb[i]); }
+        for (int i = 0; i < 4; i++)  { out_a[i] = ta[i];                out_b[i] = tb[i];                }
+        for (int i = 0; i < 4; i++)  { sa[i]    = out_a[i];              sb[i]    = out_b[i];            }
+        remaining -= n;
+    }
+}
+
+// ---- kernel: merkle_leaves_x2 ---------------------------------------------
+// One thread hashes TWO consecutive leaf rows. Odd-row tail handled separately.
+// Dispatch: ceil(num_rows / 2) threads. Odd last row (if num_rows is odd) is
+// picked up by an extra-thread fallback below.
+kernel void merkle_leaves_x2(
+    device const ulong* inp   [[ buffer(0) ]],
+    device       ulong* tree  [[ buffer(1) ]],
+    constant     uint&  ncols [[ buffer(2) ]],
+    constant     uint&  dim   [[ buffer(3) ]],
+    constant     uint&  num_rows [[ buffer(4) ]],
+    uint tid [[ thread_position_in_grid ]]
+) {
+    uint size = ncols * dim;
+    uint row_a = tid * 2;
+    uint row_b = row_a + 1;
+    if (row_a >= num_rows) return;
+
+    if (row_b < num_rows) {
+        // Pair path: hash both rows in lockstep for ILP.
+        ulong out_a[4], out_b[4];
+        linear_hash_x2(out_a, out_b,
+                       inp + (ulong)row_a * (ulong)size,
+                       inp + (ulong)row_b * (ulong)size,
+                       size);
+        for (int i = 0; i < 4; i++) {
+            tree[row_a * 4 + i] = out_a[i];
+            tree[row_b * 4 + i] = out_b[i];
+        }
+    } else {
+        // Odd tail: scalar pod12 on the lone last row.
+        ulong out[4];
+        linear_hash(out, inp + (ulong)row_a * (ulong)size, size);
+        for (int i = 0; i < 4; i++) tree[row_a * 4 + i] = out[i];
     }
 }
 

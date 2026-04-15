@@ -147,11 +147,18 @@ static void bench_one_size(uint64_t ncols, uint64_t nrows, int iters) {
     Result r_coop = time_run(
         [&]{ PoseidonGoldilocks::merkletree_metal(tree, cols, ncols, nrows); },
         tree, n_tree, iters);
+
+    // Metal, x2 ILP kernel (2 rows per thread)
+    g_merkle_use_simd_coop = 2;
+    Result r_x2 = time_run(
+        [&]{ PoseidonGoldilocks::merkletree_metal(tree, cols, ncols, nrows); },
+        tree, n_tree, iters);
     g_merkle_use_simd_coop = 0;
 
     const char* check_seq_neon  = (r_seq.root0 == r_neon.root0)  ? "match" : "DIVERGE";
     const char* check_seq_metal = (r_seq.root0 == r_metal.root0) ? "match" : "DIVERGE";
     const char* check_seq_coop  = (r_seq.root0 == r_coop.root0)  ? "match" : "DIVERGE";
+    const char* check_seq_x2    = (r_seq.root0 == r_x2.root0)    ? "match" : "DIVERGE";
 
     printf("\n=== Merkle  ncols=%llu  nrows=%llu  (iters=%d) ===\n",
            (unsigned long long)ncols, (unsigned long long)nrows, iters);
@@ -171,6 +178,11 @@ static void bench_one_size(uint64_t ncols, uint64_t nrows, int iters) {
            r_neon.ms  > 0 ? r_neon.ms  / r_coop.ms : 0.0,
            r_metal.ms > 0 ? r_metal.ms / r_coop.ms : 0.0,
            check_seq_coop);
+    printf("  metal (x2)   : %10.3f ms   (%5.2fx vs neon, %5.2fx vs metal-row, check=%s)\n",
+           r_x2.ms,
+           r_neon.ms  > 0 ? r_neon.ms  / r_x2.ms : 0.0,
+           r_metal.ms > 0 ? r_metal.ms / r_x2.ms : 0.0,
+           check_seq_x2);
 
     delete[] cols;
     delete[] tree;

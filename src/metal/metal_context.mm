@@ -368,6 +368,40 @@ void metal_dispatch_merkle_parents(MetalCtxHandle ctx,
     }
 }
 
+void metal_dispatch_merkle_leaves_x2(MetalCtxHandle ctx,
+                                      MetalBufHandle in_buf,
+                                      MetalBufHandle tree_buf,
+                                      uint32_t ncols,
+                                      uint32_t dim,
+                                      uint32_t num_rows) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        id<MTLComputePipelineState> pso =
+            (__bridge id<MTLComputePipelineState>)(
+                metal_context_pipeline(ctx, "merkle_leaves_x2"));
+
+        id<MTLCommandBuffer>        cmd = [impl->_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(in_buf)   offset:0 atIndex:0];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(tree_buf) offset:0 atIndex:1];
+        [enc setBytes:&ncols    length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&dim      length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&num_rows length:sizeof(uint32_t) atIndex:4];
+
+        // ceil(num_rows / 2) threads (each thread handles a pair).
+        NSUInteger tpg     = threadgroup_size_for(pso, 64);
+        NSUInteger threads = (NSUInteger)((num_rows + 1) / 2);
+        NSUInteger groups  = (threads + tpg - 1) / tpg;
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+}
+
 void metal_dispatch_merkle_parents_all_levels(MetalCtxHandle ctx,
                                                 MetalBufHandle buf,
                                                 uint32_t initial_pending) {

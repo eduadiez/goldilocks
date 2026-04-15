@@ -112,6 +112,18 @@ void metal_dispatch_merkle_leaves_simd(MetalCtxHandle ctx,
                                         uint32_t dim,
                                         uint32_t num_rows);
 
+// merkle_leaves_x2: one thread hashes TWO consecutive rows in lockstep.
+// Doubles per-thread register pressure but exposes 2-way ILP to the compiler
+// (non-data-dependent ops across the two hashes can issue interleaved).
+// Mirrors the CPU NEON `hash_full_result_neon_2` strategy.
+// Dispatch: ceil(num_rows / 2) threads.
+void metal_dispatch_merkle_leaves_x2(MetalCtxHandle ctx,
+                                       MetalBufHandle in_buf,
+                                       MetalBufHandle tree_buf,
+                                       uint32_t ncols,
+                                       uint32_t dim,
+                                       uint32_t num_rows);
+
 // merkle_parents: one thread per parent output node.
 //   buf       = full tree buffer  (buffer(0))
 //   nextIndex = flat element offset to start of children level  (buffer(1) constant)
