@@ -73,6 +73,15 @@ bench_merkle: bench_merkle.mm $(METAL_BRIDGE_SRCS)
 	    bench_merkle.mm $(METAL_BRIDGE_SRCS) $(GL_OBJ) \
 	    $(GL_LIBS) -o $@
 
+# Batched Merkle throughput: sequential vs batched.
+bench_merkle_batch: bench_merkle_batch.mm $(METAL_BRIDGE_SRCS)
+	$(CXX) -std=c++17 -O3 -fobjc-arc -ObjC++ $(MTL_FRAMEWORKS) \
+	    $(GL_INC) $(OMP_FLAGS) \
+	    -DGOLDILOCKS_HAS_METAL \
+	    -DMTL_KERNEL_DIR=\"$(MTL_KERNEL_DIR)\" \
+	    bench_merkle_batch.mm $(METAL_BRIDGE_SRCS) $(GL_OBJ) \
+	    $(GL_LIBS) -o $@
+
 # Throughput comparison: CPU (NEON fast path) vs Metal on forward NTT.
 # Links ntt_metal.mm + metal_context.mm + poseidon_metal.mm (bridge sources)
 # plus NTT CPU core (ntt_goldilocks.cpp) and field/Poseidon deps.

@@ -499,6 +499,87 @@ void metal_dispatch_merkle_leaves_x2(MetalCtxHandle ctx,
     }
 }
 
+// Helper: encode a single tree's full Merkle build (leaves + all parent
+// levels) into a CALLER-OWNED compute command encoder. Does NOT commit or
+// wait. Barriers are within-encoder so this single tree's internal
+// dependencies are respected; separate encoders can overlap across trees.
+static void encode_single_tree(MetalCtxHandle ctx,
+                                id<MTLCommandBuffer> cmd,
+                                MetalBufHandle in_buf,
+                                MetalBufHandle tree_buf,
+                                uint32_t ncols,
+                                uint32_t dim,
+                                uint32_t num_rows) {
+    GoldilocksMetalContext* impl = get_impl(ctx);
+    id<MTLComputePipelineState> leaves_pso =
+        (__bridge id<MTLComputePipelineState>)(
+            metal_context_pipeline(ctx, "merkle_leaves"));
+    id<MTLComputePipelineState> parents_pso =
+        (__bridge id<MTLComputePipelineState>)(
+            metal_context_pipeline(ctx, "merkle_parents"));
+    (void)impl;
+
+    // Each tree gets its OWN compute encoder. This lets Metal's automatic
+    // hazard tracking allow tree N+1's encoder to run alongside tree N's
+    // on the GPU (separate encoders, different buffers → no serialization).
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+
+    // -- Phase 1: leaves --
+    [enc setComputePipelineState:leaves_pso];
+    [enc setBuffer:(__bridge id<MTLBuffer>)(in_buf)   offset:0 atIndex:0];
+    [enc setBuffer:(__bridge id<MTLBuffer>)(tree_buf) offset:0 atIndex:1];
+    [enc setBytes:&ncols length:sizeof(uint32_t) atIndex:2];
+    [enc setBytes:&dim   length:sizeof(uint32_t) atIndex:3];
+    NSUInteger leaves_tpg    = threadgroup_size_for(leaves_pso, 64);
+    NSUInteger leaves_groups = ((NSUInteger)num_rows + leaves_tpg - 1) / leaves_tpg;
+    [enc dispatchThreadgroups:MTLSizeMake(leaves_groups, 1, 1)
+       threadsPerThreadgroup:MTLSizeMake(leaves_tpg, 1, 1)];
+
+    // -- Phase 2: all parent levels (batched, with barriers between) --
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    [enc setComputePipelineState:parents_pso];
+    [enc setBuffer:(__bridge id<MTLBuffer>)(tree_buf) offset:0 atIndex:0];
+
+    NSUInteger parents_tpg = threadgroup_size_for(parents_pso, 64);
+    uint32_t pending   = num_rows;
+    uint32_t nextIndex = 0;
+    while (pending > 1) {
+        uint32_t nextN = (pending - 1) / 2 + 1;
+        [enc setBytes:&nextIndex length:sizeof(uint32_t) atIndex:1];
+        [enc setBytes:&pending   length:sizeof(uint32_t) atIndex:2];
+        NSUInteger groups = ((NSUInteger)nextN + parents_tpg - 1) / parents_tpg;
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(parents_tpg, 1, 1)];
+        nextIndex += pending * 4;
+        pending   /= 2;
+        if (pending > 1) {
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        }
+    }
+
+    [enc endEncoding];
+}
+
+void metal_dispatch_merkletree_batch(MetalCtxHandle ctx,
+                                      const MetalBufHandle* in_bufs,
+                                      const MetalBufHandle* tree_bufs,
+                                      uint32_t count,
+                                      uint32_t ncols,
+                                      uint32_t dim,
+                                      uint32_t num_rows) {
+    if (count == 0) return;
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        id<MTLCommandBuffer> cmd = [impl->_queue commandBuffer];
+        for (uint32_t i = 0; i < count; i++) {
+            encode_single_tree(ctx, cmd, in_bufs[i], tree_bufs[i],
+                                ncols, dim, num_rows);
+        }
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+}
+
 void metal_dispatch_merkle_parents_all_levels(MetalCtxHandle ctx,
                                                 MetalBufHandle buf,
                                                 uint32_t initial_pending) {

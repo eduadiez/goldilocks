@@ -228,19 +228,29 @@ static void bench_one_size(uint64_t ncols, uint64_t nrows, int iters) {
     delete[] tree;
 }
 
-int main() {
+int main(int argc, char** argv) {
     @autoreleasepool {
         load_metallib_or_source();
         printf("bench_merkle: Apple M-series Goldilocks Merkle (seq / neon / metal)\n");
 
+        bool big = (argc > 1 && std::string(argv[1]) == "--big");
+
         // Small: oracle size (primarily correctness + dispatch overhead)
         bench_one_size(128,   64,     50);
-        // Medium
         bench_one_size(128,   4096,   20);
-        // Large-ish
         bench_one_size(128,   65536,   5);
-        // Stress (may OOM on small systems; comment out if needed)
         bench_one_size(128,  262144,   3);
+
+        if (big) {
+            printf("\n--- production-scale shapes (larger ncols / nrows) ---\n");
+            // Realistic STARK prover shapes:
+            //   FFT-domain merkle at 2^18..2^20 with 64-256 cols.
+            //   Input sizes here:  1 GiB .. 2 GiB per input.
+            bench_one_size(64,    (uint64_t)(1ULL << 20),   2);  //  64 cols × 1M rows   = 512 MB
+            bench_one_size(128,   (uint64_t)(1ULL << 20),   2);  // 128 cols × 1M rows   = 1 GB
+            bench_one_size(256,   (uint64_t)(1ULL << 18),   2);  // 256 cols × 256k rows = 512 MB
+            bench_one_size(512,   (uint64_t)(1ULL << 18),   2);  // 512 cols × 256k rows = 1 GB
+        }
     }
     return 0;
 }

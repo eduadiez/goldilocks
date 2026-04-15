@@ -26,6 +26,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdlib.h>
+#include <vector>
 
 #include "../goldilocks_base_field.hpp"
 #include "metal_context.hpp"
@@ -155,6 +156,69 @@ void merkletree_metal(Goldilocks::Element* tree,
         metal_buf_release(input_buf);
         metal_buf_release(tree_buf);
     }  // @autoreleasepool
+}
+
+// ---------------------------------------------------------------------------
+// merkletree_metal_batch — build `count` Merkle trees in one GPU submission.
+//
+// Why this helps: the GPU queue runs command buffers serially, but WITHIN
+// one command buffer Metal's hazard tracker allows dispatches from different
+// compute encoders to overlap if they touch different resources. Putting
+// each tree in its OWN encoder inside one big command buffer lets the GPU
+// start tree N+1's leaf kernel while tree N's parent loop is still running.
+//
+// All trees must share (num_cols, num_rows). Same bit-exact contract as
+// merkletree_metal.
+void merkletree_metal_batch(Goldilocks::Element** trees,
+                            Goldilocks::Element** inputs,
+                            uint64_t count,
+                            uint64_t num_cols,
+                            uint64_t num_rows)
+{
+    if (count == 0 || num_rows == 0) return;
+    @autoreleasepool {
+        MetalCtxHandle ctx = metal_context_get();
+
+        uint64_t numElementsTree = (2 * num_rows - 1) * HASH_SIZE_;
+        size_t   tree_bytes      = numElementsTree * sizeof(Goldilocks::Element);
+        size_t   input_bytes     = num_rows * num_cols * sizeof(Goldilocks::Element);
+
+        std::vector<MetalBufHandle> in_bufs(count, nullptr);
+        std::vector<MetalBufHandle> tree_bufs(count, nullptr);
+        std::vector<int>            in_is_copy(count, 0);
+        std::vector<int>            tree_is_copy(count, 0);
+
+        for (uint64_t i = 0; i < count; i++) {
+            if (num_cols > 0 && inputs[i] != nullptr) {
+                in_bufs[i] = metal_buf_alias(ctx, (void*)inputs[i],
+                                              input_bytes, &in_is_copy[i]);
+            } else {
+                in_bufs[i] = metal_buf_alloc(ctx, sizeof(uint64_t));
+            }
+            tree_bufs[i] = metal_buf_alias(ctx, (void*)trees[i],
+                                            tree_bytes, &tree_is_copy[i]);
+        }
+
+        uint32_t ncols32 = (uint32_t)num_cols;
+        uint32_t dim32   = 1;
+        uint32_t nrows32 = (uint32_t)num_rows;
+
+        metal_dispatch_merkletree_batch(ctx,
+                                         in_bufs.data(),
+                                         tree_bufs.data(),
+                                         (uint32_t)count,
+                                         ncols32, dim32, nrows32);
+
+        // Readback copy-fallback trees and release handles.
+        for (uint64_t i = 0; i < count; i++) {
+            if (tree_is_copy[i]) {
+                void* gpu_ptr = metal_buf_contents(tree_bufs[i]);
+                std::memcpy(trees[i], gpu_ptr, tree_bytes);
+            }
+            metal_buf_release(in_bufs[i]);
+            metal_buf_release(tree_bufs[i]);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

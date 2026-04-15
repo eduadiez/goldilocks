@@ -26,5 +26,22 @@ namespace goldilocks_metal {
     // Returns nullptr on allocation failure. Must be freed with free_aligned.
     Goldilocks::Element* allocate_aligned_elements(uint64_t n);
     void                 free_aligned(void* ptr);
+
+    // Batched Merkle-tree build: processes `count` trees in ONE Metal command
+    // buffer using separate compute encoders per tree so the GPU scheduler
+    // can overlap tree N+1's leaf work with tree N's parent loops. Expected
+    // ~1.3-1.5× throughput improvement over sequential merkletree_metal calls
+    // for STARK-prover-style workloads that build many Merkle trees in a row
+    // (e.g., one per column group, 10-40 trees per proof).
+    //
+    // All trees MUST share the same (num_cols, num_rows) shape. Each
+    // tree[i] / input[i] pair is treated as it would be by merkletree_metal
+    // (same layout, same bit-exact output guarantee). Returns when all
+    // trees are fully written back.
+    void merkletree_metal_batch(Goldilocks::Element** trees,
+                                Goldilocks::Element** inputs,
+                                uint64_t count,
+                                uint64_t num_cols,
+                                uint64_t num_rows);
 }
 #endif

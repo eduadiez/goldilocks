@@ -155,6 +155,24 @@ void metal_dispatch_merkle_leaves_tg(MetalCtxHandle ctx,
                                       uint32_t dim,
                                       uint32_t num_rows);
 
+// Batched Merkle tree build: processes `count` trees in ONE command buffer,
+// using separate compute encoders per tree. Since distinct trees touch
+// distinct buffers, Metal's automatic hazard tracking across encoders
+// allows tree N+1's leaf work to overlap with tree N's parent loops on the
+// GPU scheduler. One waitUntilCompleted at the very end instead of per
+// tree. Expected win for STARK-prover-style workloads that build many
+// Merkle trees in sequence.
+//
+// in_bufs  = array of `count` input buffer handles (each [num_rows * ncols])
+// tree_bufs = array of `count` tree buffer handles (each tree_bytes)
+void metal_dispatch_merkletree_batch(MetalCtxHandle ctx,
+                                      const MetalBufHandle* in_bufs,
+                                      const MetalBufHandle* tree_bufs,
+                                      uint32_t count,
+                                      uint32_t ncols,
+                                      uint32_t dim,
+                                      uint32_t num_rows);
+
 // merkle_parents: one thread per parent output node.
 //   buf       = full tree buffer  (buffer(0))
 //   nextIndex = flat element offset to start of children level  (buffer(1) constant)
