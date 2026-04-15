@@ -138,6 +138,8 @@ template <> struct GLSimd<Neon> {
     //
     // Reduction follows scalar Goldilocks::mul: 2^64 ≡ 2^32 - 1 (mod p).
     // Non-canonical output in [0, 2^64); public mul() canonicalizes.
+    // Scalar Goldilocks mul reduction (non-canonical output). Used by both the
+    // C++ and inline-ASM mul paths.
     static inline __attribute__((always_inline)) uint64_t mul_scalar(uint64_t a, uint64_t b) {
         __uint128_t prod = (__uint128_t)a * (__uint128_t)b;
         uint64_t c_lo = (uint64_t)prod;
@@ -149,7 +151,6 @@ template <> struct GLSimd<Neon> {
         bool borrow = s > c_lo;
         uint64_t s2 = s + (c_hi_lo << 32);
         bool carry2 = s2 < s;
-        // Plonky3 shift-sub: c_hi_hi * EPSILON = (c_hi_hi << 32) - c_hi_hi
         uint64_t s3 = s2 + ((c_hi_hi << 32) - c_hi_hi);
         bool carry3 = s3 < s2;
 
@@ -159,15 +160,41 @@ template <> struct GLSimd<Neon> {
         return r;
     }
 
+    // Phase 1g: scalar mul per lane, branchless reduction.
+    // The `if (adj < 0)` branch creates a mispredict penalty when mixed inputs
+    // trigger it randomly. Rewrite as fully branchless arithmetic.
     static inline __attribute__((always_inline)) Vec mul_reduced(Vec a, Vec b) {
         uint64_t a0 = vgetq_lane_u64(a, 0);
         uint64_t a1 = vgetq_lane_u64(a, 1);
         uint64_t b0 = vgetq_lane_u64(b, 0);
         uint64_t b1 = vgetq_lane_u64(b, 1);
-        uint64_t r0 = mul_scalar(a0, b0);
-        uint64_t r1 = mul_scalar(a1, b1);
-        uint64_t tmp[2] = {r0, r1};
+
+        uint64_t tmp[2] = { mul_scalar_branchless(a0, b0), mul_scalar_branchless(a1, b1) };
         return vld1q_u64(tmp);
+    }
+
+    // Branchless Goldilocks mul reduction per lane.
+    // adj ∈ {-1, 0, 1, 2}; encode into (pos_count, borrow) where pos * EPSILON
+    // is added and borrow * EPSILON is subtracted. Both paths merge to one add-sub.
+    static inline __attribute__((always_inline)) uint64_t mul_scalar_branchless(uint64_t a, uint64_t b) {
+        __uint128_t prod = (__uint128_t)a * (__uint128_t)b;
+        uint64_t c_lo = (uint64_t)prod;
+        uint64_t c_hi = (uint64_t)(prod >> 64);
+        uint64_t c_hi_lo = (uint32_t)c_hi;
+        uint64_t c_hi_hi = c_hi >> 32;
+        const uint64_t EPS = (uint64_t)GOLDILOCKS_PRIME_NEG;
+
+        uint64_t s = c_lo - c_hi;
+        uint64_t borrow = (uint64_t)(s > c_lo);
+        uint64_t s2 = s + (c_hi_lo << 32);
+        uint64_t carry2 = (uint64_t)(s2 < s);
+        uint64_t s3 = s2 + ((c_hi_hi << 32) - c_hi_hi);
+        uint64_t carry3 = (uint64_t)(s3 < s2);
+
+        // r = s3 + (carry2 + carry3) * EPS - borrow * EPS  (non-canonical).
+        uint64_t pos_cq = (carry2 + carry3) * EPS;
+        uint64_t neg_cq = borrow * EPS;
+        return s3 + pos_cq - neg_cq;
     }
 
     // Public canonical mul — preserves the [0, P) output contract.
