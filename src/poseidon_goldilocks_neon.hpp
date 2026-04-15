@@ -21,10 +21,10 @@ inline void PoseidonGoldilocks::pow7_neon(uint64x2_t st[6])
     // Phase 1e: use non-canonical mul/square. Outputs may exceed P but stay
     // in [0, 2^64); mul_reduced accepts any input in that range.
     for (int i = 0; i < 6; ++i) {
-        auto pw2 = N::square(st[i]);
-        auto pw4 = N::square(pw2);
-        auto pw3 = N::mul(pw2, st[i]);
-        st[i] = N::mul(pw3, pw4);
+        auto pw2 = N::square_reduced(st[i]);
+        auto pw4 = N::square_reduced(pw2);
+        auto pw3 = N::mul_reduced(pw2, st[i]);
+        st[i] = N::mul_reduced(pw3, pw4);
     }
 }
 
@@ -53,7 +53,7 @@ inline void PoseidonGoldilocks::mvp_neon(Goldilocks::Element *state,
         uint64x2_t bc = N::splat(old_state[j].fe);
         for (int i = 0; i < 6; ++i) {
             uint64x2_t m_ji = N::load(&mat[j][i * 2]);
-            out[i] = N::add(out[i], N::mul(bc, m_ji));
+            out[i] = N::add(out[i], N::mul_reduced(bc, m_ji));
         }
     }
     for (int i = 0; i < 6; ++i) N::store(&state[i * 2], out[i]);
@@ -73,7 +73,7 @@ inline void PoseidonGoldilocks::mvp_neon_2(uint64x2_t st[12],
         uint64x2_t acc = N::splat(0);
         for (int j = 0; j < 12; ++j) {
             uint64x2_t m_jk = N::splat(mat[j][k].fe);
-            acc = N::add(acc, N::mul(m_jk, old[j]));
+            acc = N::add(acc, N::mul_reduced(m_jk, old[j]));
         }
         st[k] = acc;
     }
@@ -89,7 +89,7 @@ inline Goldilocks::Element PoseidonGoldilocks::dot_neon(const Goldilocks::Elemen
     for (int i = 0; i < 6; ++i) {
         uint64x2_t xv = N::load(&x[i * 2]);
         uint64x2_t cv = N::load(&C[i * 2]);
-        acc = N::add(acc, N::mul(xv, cv));
+        acc = N::add(acc, N::mul_reduced(xv, cv));
     }
     // Canonicalize acc lane values before horizontal reduce
     acc = N::canonicalize(acc);

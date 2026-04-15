@@ -405,10 +405,15 @@ void PoseidonGoldilocks::hash_full_result_neon(Goldilocks::Element *state, const
         for (int i = 0; i < 6; ++i) st[i] = N::load(&state[i * 2]);
     }
 
-    // Final pow7 + mvp
+    // Final pow7 + mvp, then canonicalize once before exit (Phase 1h:
+    // intermediate muls are non-canonical for speed; single canonicalize
+    // at the state boundary).
     pow7_neon(st);
     for (int i = 0; i < 6; ++i) N::store(&state[i * 2], st[i]);
     mvp_neon(state, PoseidonGoldilocksConstants::M);
+    for (int i = 0; i < 6; ++i) {
+        N::store(&state[i * 2], N::canonicalize(N::load(&state[i * 2])));
+    }
 }
 
 // Phase 1c: 2-hash-parallel NEON Poseidon. Processes 2 independent hashes
@@ -434,10 +439,10 @@ void PoseidonGoldilocks::hash_full_result_neon_2(
 
     auto pow7_pair = [&]() {
         for (int k = 0; k < 12; ++k) {
-            auto pw2 = N::square(st[k]);
-            auto pw4 = N::square(pw2);
-            auto pw3 = N::mul(pw2, st[k]);
-            st[k] = N::mul(pw3, pw4);
+            auto pw2 = N::square_reduced(st[k]);
+            auto pw4 = N::square_reduced(pw2);
+            auto pw3 = N::mul_reduced(pw2, st[k]);
+            st[k] = N::mul_reduced(pw3, pw4);
         }
     };
     auto add_pair = [&](const Goldilocks::Element *C) {
@@ -462,10 +467,10 @@ void PoseidonGoldilocks::hash_full_result_neon_2(
     // lane-parallel dot product and lane-parallel W accumulation.
     for (int r = 0; r < N_PARTIAL_ROUNDS; ++r) {
         // pow7 on st[0] — both hashes parallel
-        auto pw2 = N::square(st[0]);
-        auto pw4 = N::square(pw2);
-        auto pw3 = N::mul(pw2, st[0]);
-        st[0] = N::mul(pw3, pw4);
+        auto pw2 = N::square_reduced(st[0]);
+        auto pw4 = N::square_reduced(pw2);
+        auto pw3 = N::mul_reduced(pw2, st[0]);
+        st[0] = N::mul_reduced(pw3, pw4);
 
         // st[0] += C[...+r]
         st[0] = N::add(st[0], N::splat(PoseidonGoldilocksConstants::C[(HALF_N_FULL_ROUNDS + 1) * SPONGE_WIDTH + r].fe));
@@ -474,13 +479,13 @@ void PoseidonGoldilocks::hash_full_result_neon_2(
         const Goldilocks::Element *S = &PoseidonGoldilocksConstants::S[(SPONGE_WIDTH * 2 - 1) * r];
         uint64x2_t s0 = N::splat(0);
         for (int k = 0; k < SPONGE_WIDTH; ++k) {
-            s0 = N::add(s0, N::mul(st[k], N::splat(S[k].fe)));
+            s0 = N::add(s0, N::mul_reduced(st[k], N::splat(S[k].fe)));
         }
 
         // W[k] = st[0] * S[SPONGE_WIDTH - 1 + k], state[k] += W[k]
         uint64x2_t st0_saved = st[0];
         for (int k = 0; k < SPONGE_WIDTH; ++k) {
-            uint64x2_t W_k = N::mul(st0_saved, N::splat(S[SPONGE_WIDTH - 1 + k].fe));
+            uint64x2_t W_k = N::mul_reduced(st0_saved, N::splat(S[SPONGE_WIDTH - 1 + k].fe));
             st[k] = N::add(st[k], W_k);
         }
         st[0] = s0;
@@ -497,10 +502,10 @@ void PoseidonGoldilocks::hash_full_result_neon_2(
     pow7_pair();
     mvp_neon_2(st, PoseidonGoldilocksConstants::M);
 
-    // Store
+    // Canonicalize at store (Phase 1h: muls inside the hash are non-canonical).
     Goldilocks::Element lanes[2];
     for (int k = 0; k < 12; ++k) {
-        N::store(lanes, st[k]);
+        N::store(lanes, N::canonicalize(st[k]));
         state_A[k].fe = lanes[0].fe;
         state_B[k].fe = lanes[1].fe;
     }
