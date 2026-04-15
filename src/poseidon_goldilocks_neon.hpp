@@ -18,13 +18,21 @@ inline void PoseidonGoldilocks::hash_neon(Goldilocks::Element (&state)[CAPACITY]
 inline void PoseidonGoldilocks::pow7_neon(uint64x2_t st[6])
 {
     using N = goldilocks::simd::GLSimd<goldilocks::simd::Neon>;
-    // Phase 1e: use non-canonical mul/square. Outputs may exceed P but stay
-    // in [0, 2^64); mul_reduced accepts any input in that range.
-    for (int i = 0; i < 6; ++i) {
-        auto pw2 = N::square_reduced(st[i]);
-        auto pw4 = N::square_reduced(pw2);
-        auto pw3 = N::mul_reduced(pw2, st[i]);
-        st[i] = N::mul_reduced(pw3, pw4);
+    // Phase 1j: unrolled in pairs so the compiler / CPU sees two independent
+    // mul chains per iteration. Apple Silicon has 2 integer-mul pipes;
+    // interleaving exposes them both every cycle instead of stalling on the
+    // pw2 -> pw4 dependency.
+    for (int i = 0; i < 6; i += 2) {
+        auto a0 = st[i];
+        auto a1 = st[i + 1];
+        auto pw2_0 = N::square_reduced(a0);
+        auto pw2_1 = N::square_reduced(a1);
+        auto pw4_0 = N::square_reduced(pw2_0);
+        auto pw4_1 = N::square_reduced(pw2_1);
+        auto pw3_0 = N::mul_reduced(pw2_0, a0);
+        auto pw3_1 = N::mul_reduced(pw2_1, a1);
+        st[i]     = N::mul_reduced(pw3_0, pw4_0);
+        st[i + 1] = N::mul_reduced(pw3_1, pw4_1);
     }
 }
 

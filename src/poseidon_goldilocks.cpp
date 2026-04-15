@@ -437,12 +437,19 @@ void PoseidonGoldilocks::hash_full_result_neon_2(
         st[k] = N::add(st[k], N::splat(PoseidonGoldilocksConstants::C[k].fe));
     }
 
+    // Phase 1j: unrolled in pairs — two independent mul chains per iteration.
     auto pow7_pair = [&]() {
-        for (int k = 0; k < 12; ++k) {
-            auto pw2 = N::square_reduced(st[k]);
-            auto pw4 = N::square_reduced(pw2);
-            auto pw3 = N::mul_reduced(pw2, st[k]);
-            st[k] = N::mul_reduced(pw3, pw4);
+        for (int k = 0; k < 12; k += 2) {
+            auto a0 = st[k];
+            auto a1 = st[k + 1];
+            auto pw2_0 = N::square_reduced(a0);
+            auto pw2_1 = N::square_reduced(a1);
+            auto pw4_0 = N::square_reduced(pw2_0);
+            auto pw4_1 = N::square_reduced(pw2_1);
+            auto pw3_0 = N::mul_reduced(pw2_0, a0);
+            auto pw3_1 = N::mul_reduced(pw2_1, a1);
+            st[k]     = N::mul_reduced(pw3_0, pw4_0);
+            st[k + 1] = N::mul_reduced(pw3_1, pw4_1);
         }
     };
     auto add_pair = [&](const Goldilocks::Element *C) {
