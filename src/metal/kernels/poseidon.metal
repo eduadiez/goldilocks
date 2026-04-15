@@ -45,9 +45,12 @@ inline ulong pow7_elem(ulong x) {
 // instead of a full 128-bit one. ~2× faster per mul than gl_mul.
 inline void mvp_M(thread ulong st[12]) {
     ulong old[12];
+    #pragma unroll
     for (int i = 0; i < 12; i++) old[i] = st[i];
+    #pragma unroll
     for (int i = 0; i < 12; i++) {
         ulong acc = gl_mul_small(old[0], (uint)M_[i * 12 + 0]);
+        #pragma unroll
         for (int j = 1; j < 12; j++) {
             acc = gl_add(acc, gl_mul_small(old[j], (uint)M_[i * 12 + j]));
         }
@@ -60,9 +63,12 @@ inline void mvp_M(thread ulong st[12]) {
 // rounds. Unlike M_, P_ has 132 of 144 entries > 2^32 — full gl_mul required.
 inline void mvp_P(thread ulong st[12]) {
     ulong old[12];
+    #pragma unroll
     for (int i = 0; i < 12; i++) old[i] = st[i];
+    #pragma unroll
     for (int i = 0; i < 12; i++) {
         ulong acc = gl_mul(old[0], P_[i * 12 + 0]);
+        #pragma unroll
         for (int j = 1; j < 12; j++) {
             acc = gl_add(acc, gl_mul(old[j], P_[i * 12 + j]));
         }
@@ -75,71 +81,69 @@ inline void mvp_P(thread ulong st[12]) {
 // Canonicalize is done by the caller at kernel exit.
 inline void pod12(thread ulong st[12]) {
     // Step 1: add initial round constants C[0..11]
+    #pragma unroll
     for (int i = 0; i < 12; i++) {
         st[i] = gl_add(st[i], C[i]);
     }
 
     // Step 2: first HALF_N_FULL_ROUNDS-1 = 3 full rounds
-    // Each: pow7 all 12, add C[(r+1)*12..], mvp_M
+    #pragma unroll
     for (int r = 0; r < 3; r++) {
+        #pragma unroll
         for (int i = 0; i < 12; i++) st[i] = pow7_elem(st[i]);
         int base = (r + 1) * 12;
+        #pragma unroll
         for (int i = 0; i < 12; i++) st[i] = gl_add(st[i], C[base + i]);
         mvp_M(st);
     }
 
     // Step 3: transition round — pow7 + add + mvp_P (P used ONCE)
+    #pragma unroll
     for (int i = 0; i < 12; i++) st[i] = pow7_elem(st[i]);
     {
-        int base = 4 * 12;  // HALF_N_FULL_ROUNDS * SPONGE_WIDTH = 4*12 = 48
+        int base = 4 * 12;
+        #pragma unroll
         for (int i = 0; i < 12; i++) st[i] = gl_add(st[i], C[base + i]);
     }
     mvp_P(st);
 
-    // Step 4: N_PARTIAL_ROUNDS = 22 partial rounds (only state[0] raised to 7)
-    // S array stride: 2*SPONGE_WIDTH - 1 = 23 per round
-    // - dot uses S[23*r .. 23*r+11]  (first 12 elements of row)
-    // - prod uses S[23*r+11 .. 23*r+22] (last 12 elements of row, 11 shared w/ dot end)
-    // C offset for partial rounds: (HALF_N_FULL_ROUNDS+1)*12 + r = 5*12 + r = 60+r
+    // Step 4: N_PARTIAL_ROUNDS = 22 partial rounds
+    #pragma unroll
     for (int r = 0; r < 22; r++) {
         st[0] = pow7_elem(st[0]);
-        st[0] = gl_add(st[0], C[60 + r]);  // C[(HALF+1)*12 + r] = C[5*12+r]
+        st[0] = gl_add(st[0], C[60 + r]);
 
-        // dot_(state, S[23*r..]) over 12 elements
         int s_base = 23 * r;
         ulong s0 = gl_mul(st[0], S[s_base]);
+        #pragma unroll
         for (int i = 1; i < 12; i++) {
             s0 = gl_add(s0, gl_mul(st[i], S[s_base + i]));
         }
 
-        // prod_(W_, state[0], S[23*r+11..]) — produces W_[0..11]
-        // W_[i] = state[0] * S[23*r + 11 + i]
-        // then state[i] += W_[i] for i=1..11; state[0] = s0
-        int s_base2 = 23 * r + 11;  // SPONGE_WIDTH - 1 = 11
+        int s_base2 = 23 * r + 11;
+        #pragma unroll
         for (int i = 1; i < 12; i++) {
             ulong wi = gl_mul(st[0], S[s_base2 + i]);
             st[i] = gl_add(st[i], wi);
         }
-        // W_[0] = state[0]*S[s_base2] but state[0] is replaced by s0, not added
-        // (prod_ fills W_[0..11], add_ adds to state[0..11], then state[0]=s0 overwrites)
-        // So state[0] effectively becomes s0:
         st[0] = s0;
     }
 
     // Step 5: second HALF_N_FULL_ROUNDS-1 = 3 full rounds
-    // C offset: (HALF+1)*12 + N_PARTIAL + r*12 = 5*12+22 + r*12 = 82+r*12
+    #pragma unroll
     for (int r = 0; r < 3; r++) {
+        #pragma unroll
         for (int i = 0; i < 12; i++) st[i] = pow7_elem(st[i]);
-        int base = 82 + r * 12;  // (HALF_N_FULL_ROUNDS+1)*12 + N_PARTIAL_ROUNDS + r*12
+        int base = 82 + r * 12;
+        #pragma unroll
         for (int i = 0; i < 12; i++) st[i] = gl_add(st[i], C[base + i]);
         mvp_M(st);
     }
 
-    // Step 6: final pow7 all 12 + mvp_M (no add_ before final mvp)
+    // Step 6: final pow7 all 12 + mvp_M
+    #pragma unroll
     for (int i = 0; i < 12; i++) st[i] = pow7_elem(st[i]);
     mvp_M(st);
-
-    // NO canonicalize here — caller does it at kernel exit
 }
 
 // ---- pod12_tg: threadgroup-constants variant of pod12 ----------------------

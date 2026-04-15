@@ -64,25 +64,24 @@ inline ulong gl_sub(ulong a, ulong b) {
 inline ulong gl_mul(ulong a, ulong b) {
     ulong c_lo  = a * b;
     ulong c_hi  = metal::mulhi(a, b);
-    ulong c_hi_lo = c_hi & GL_CQ;          // lower 32 bits of c_hi
-    ulong c_hi_hi = c_hi >> 32;             // upper 32 bits of c_hi
+    ulong c_hi_lo = c_hi & GL_CQ;
+    ulong c_hi_hi = c_hi >> 32;
 
     ulong s  = c_lo - c_hi;
-    bool borrow = s > c_lo;
+    int borrow = (s > c_lo) ? 1 : 0;
 
     ulong s2 = s + (c_hi_lo << 32);
-    bool carry2 = s2 < s;
+    int carry2 = (s2 < s) ? 1 : 0;
 
     ulong s3 = s2 + c_hi_hi * GL_CQ;
-    bool carry3 = s3 < s2;
+    int carry3 = (s3 < s2) ? 1 : 0;
 
-    int adj = (int)carry2 + (int)carry3 - (int)borrow;
-    ulong r;
-    if (adj >= 0) {
-        r = s3 + (ulong)adj * GL_CQ;
-    } else {
-        r = s3 - GL_CQ;
-    }
+    // adj ∈ {-1, 0, 1, 2}. Branchless reduction via signed 64-bit mul:
+    // delta = adj * GL_CQ as a signed 64-bit value. s3 + delta wraps to
+    // the correct modular result (s3 - GL_CQ when adj = -1, etc.).
+    int adj = carry2 + carry3 - borrow;
+    long delta = (long)adj * (long)GL_CQ;
+    ulong r = s3 + (ulong)delta;
     // INTENTIONALLY no: if (r >= GL_PRIME) r -= GL_PRIME;
     return r;
 }
