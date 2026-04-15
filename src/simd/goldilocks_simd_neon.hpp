@@ -331,6 +331,37 @@ template <> struct GLSimd<Neon> {
         (void)lo0; (void)lo1; (void)hi0; (void)hi1;
     }
 
+    // Phase 1p: single-lane variant for single-hash dot.
+    // Processes 2 muls per call (two different a,s pairs) to keep both integer
+    // mul pipes busy; accumulates separately into a single lane's running sums.
+    static inline __attribute__((always_inline)) void accumulate_full_single_pair(
+        uint64_t a0, uint64_t s0, uint64_t a1, uint64_t s1,
+        uint64_t& sum_lo, uint64_t& sum_hi, uint64_t& cl, uint64_t& ch)
+    {
+        uint64_t lo0, hi0, lo1, hi1;
+        asm(
+            "mul   %[lo0], %[a0], %[s0]\n\t"
+            "mul   %[lo1], %[a1], %[s1]\n\t"
+            "umulh %[hi0], %[a0], %[s0]\n\t"
+            "umulh %[hi1], %[a1], %[s1]\n\t"
+            "adds  %[slo], %[slo], %[lo0]\n\t"
+            "adc   %[cl],  %[cl],  xzr\n\t"
+            "adds  %[shi], %[shi], %[hi0]\n\t"
+            "adc   %[ch],  %[ch],  xzr\n\t"
+            "adds  %[slo], %[slo], %[lo1]\n\t"
+            "adc   %[cl],  %[cl],  xzr\n\t"
+            "adds  %[shi], %[shi], %[hi1]\n\t"
+            "adc   %[ch],  %[ch],  xzr\n\t"
+            : [lo0]"=&r"(lo0), [lo1]"=&r"(lo1),
+              [hi0]"=&r"(hi0), [hi1]"=&r"(hi1),
+              [slo]"+&r"(sum_lo), [shi]"+&r"(sum_hi),
+              [cl]"+&r"(cl), [ch]"+&r"(ch)
+            : [a0]"r"(a0), [s0]"r"(s0), [a1]"r"(a1), [s1]"r"(s1)
+            : "cc"
+        );
+        (void)lo0; (void)lo1; (void)hi0; (void)hi1;
+    }
+
     // Final reduction for the full-mul bulk accumulator.
     // r ≡ sum_lo + (cl_carries + sum_hi) * EPSILON - ch_carries * 2^32  (mod p)
     // Since ch_carries ≤ 12, ch_carries * 2^32 is small. Output non-canonical in [0, 2^64).

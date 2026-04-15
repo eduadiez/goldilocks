@@ -152,24 +152,23 @@ inline void PoseidonGoldilocks::mvp_neon_2(uint64x2_t st[12],
 }
 
 // NEON dot product: sum_{i=0..11} x[i] * C[i].
-// Lane-parallel multiply-accumulate, horizontal reduce at the end.
+// Phase 1p: bulk-reduce — accumulate all 12 raw 128-bit products into one
+// (sum_lo, sum_hi, cl, ch) state per output lane, reduce once. Pairs up muls
+// so both integer-mul pipes stay busy.
 inline Goldilocks::Element PoseidonGoldilocks::dot_neon(const Goldilocks::Element *x,
     const Goldilocks::Element C[SPONGE_WIDTH])
 {
     using N = goldilocks::simd::GLSimd<goldilocks::simd::Neon>;
-    uint64x2_t acc = N::splat(0);
-    for (int i = 0; i < 6; ++i) {
-        uint64x2_t xv = N::load(&x[i * 2]);
-        uint64x2_t cv = N::load(&C[i * 2]);
-        acc = N::add(acc, N::mul_reduced(xv, cv));
+    uint64_t slo = 0, shi = 0, cl = 0, ch = 0;
+    for (int k = 0; k < SPONGE_WIDTH; k += 2) {
+        N::accumulate_full_single_pair(
+            x[k].fe, C[k].fe, x[k + 1].fe, C[k + 1].fe,
+            slo, shi, cl, ch);
     }
-    // Canonicalize acc lane values before horizontal reduce
-    acc = N::canonicalize(acc);
-    Goldilocks::Element lanes[2];
-    N::store(lanes, acc);
-    Goldilocks::Element r;
-    Goldilocks::add(r, lanes[0], lanes[1]);
-    return r;
+    uint64_t r = N::finalize_full_sum(slo, shi, cl, ch);
+    // r is non-canonical [0, 2^64); canonicalize for return value.
+    if (r >= GOLDILOCKS_PRIME) r -= GOLDILOCKS_PRIME;
+    return Goldilocks::Element{r};
 }
 
 #endif // GOLDILOCKS_HAS_NEON
