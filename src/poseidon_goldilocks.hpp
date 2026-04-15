@@ -38,6 +38,8 @@ private:
 #ifdef GOLDILOCKS_HAS_NEON
     inline void static add_neon(uint64x2_t st[6], const Goldilocks::Element C[SPONGE_WIDTH]);
     inline void static pow7_neon(uint64x2_t st[6]);
+    inline void static mvp_neon(Goldilocks::Element *state, const Goldilocks::Element mat[SPONGE_WIDTH][SPONGE_WIDTH]);
+    inline Goldilocks::Element static dot_neon(const Goldilocks::Element *x, const Goldilocks::Element C[SPONGE_WIDTH]);
 #endif // GOLDILOCKS_HAS_NEON
 
 #ifdef __AVX512__

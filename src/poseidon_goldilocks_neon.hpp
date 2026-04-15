@@ -35,5 +35,46 @@ inline void PoseidonGoldilocks::add_neon(uint64x2_t st[6], const Goldilocks::Ele
     }
 }
 
+// NEON matrix-vector product: state = M^T * old_state (shape SPONGE_WIDTH x SPONGE_WIDTH).
+// Operates entirely in NEON registers; caller provides state both as input (old) and output.
+inline void PoseidonGoldilocks::mvp_neon(Goldilocks::Element *state,
+    const Goldilocks::Element mat[SPONGE_WIDTH][SPONGE_WIDTH])
+{
+    using N = goldilocks::simd::GLSimd<goldilocks::simd::Neon>;
+    Goldilocks::Element old_state[SPONGE_WIDTH];
+    std::memcpy(old_state, state, SPONGE_WIDTH * sizeof(Goldilocks::Element));
+
+    uint64x2_t out[6];
+    for (int i = 0; i < 6; ++i) out[i] = N::splat(0);
+
+    for (int j = 0; j < SPONGE_WIDTH; ++j) {
+        uint64x2_t bc = N::splat(old_state[j].fe);
+        for (int i = 0; i < 6; ++i) {
+            uint64x2_t m_ji = N::load(&mat[j][i * 2]);
+            out[i] = N::add(out[i], N::mul(bc, m_ji));
+        }
+    }
+    for (int i = 0; i < 6; ++i) N::store(&state[i * 2], out[i]);
+}
+
+// NEON dot product: sum_{i=0..11} x[i] * C[i].
+// Lane-parallel multiply-accumulate, horizontal reduce at the end.
+inline Goldilocks::Element PoseidonGoldilocks::dot_neon(const Goldilocks::Element *x,
+    const Goldilocks::Element C[SPONGE_WIDTH])
+{
+    using N = goldilocks::simd::GLSimd<goldilocks::simd::Neon>;
+    uint64x2_t acc = N::splat(0);
+    for (int i = 0; i < 6; ++i) {
+        uint64x2_t xv = N::load(&x[i * 2]);
+        uint64x2_t cv = N::load(&C[i * 2]);
+        acc = N::add(acc, N::mul(xv, cv));
+    }
+    Goldilocks::Element lanes[2];
+    N::store(lanes, acc);
+    Goldilocks::Element r;
+    Goldilocks::add(r, lanes[0], lanes[1]);
+    return r;
+}
+
 #endif // GOLDILOCKS_HAS_NEON
 #endif // POSEIDON_GOLDILOCKS_NEON_HPP

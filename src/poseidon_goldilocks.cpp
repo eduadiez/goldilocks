@@ -374,7 +374,7 @@ void PoseidonGoldilocks::hash_full_result_neon(Goldilocks::Element *state, const
         add_neon(st, &(PoseidonGoldilocksConstants::C[(r + 1) * SPONGE_WIDTH]));
         // Matrix mul (scalar): store, mvp_, reload
         for (int i = 0; i < 6; ++i) N::store(&state[i * 2], st[i]);
-        mvp_(state, PoseidonGoldilocksConstants::M);
+        mvp_neon(state, PoseidonGoldilocksConstants::M);
         for (int i = 0; i < 6; ++i) st[i] = N::load(&state[i * 2]);
     }
 
@@ -382,13 +382,13 @@ void PoseidonGoldilocks::hash_full_result_neon(Goldilocks::Element *state, const
     pow7_neon(st);
     add_neon(st, &(PoseidonGoldilocksConstants::C[HALF_N_FULL_ROUNDS * SPONGE_WIDTH]));
     for (int i = 0; i < 6; ++i) N::store(&state[i * 2], st[i]);
-    mvp_(state, PoseidonGoldilocksConstants::P);
+    mvp_neon(state, PoseidonGoldilocksConstants::P);
 
     // Partial rounds (scalar — mirrors _seq exactly)
     for (int r = 0; r < N_PARTIAL_ROUNDS; ++r) {
         pow7(state[0]);
         state[0] = state[0] + PoseidonGoldilocksConstants::C[(HALF_N_FULL_ROUNDS + 1) * SPONGE_WIDTH + r];
-        Goldilocks::Element s0 = dot_(state, &(PoseidonGoldilocksConstants::S[(SPONGE_WIDTH * 2 - 1) * r]));
+        Goldilocks::Element s0 = dot_neon(state, &(PoseidonGoldilocksConstants::S[(SPONGE_WIDTH * 2 - 1) * r]));
         Goldilocks::Element W_[SPONGE_WIDTH];
         prod_(W_, state[0], &(PoseidonGoldilocksConstants::S[(SPONGE_WIDTH * 2 - 1) * r + SPONGE_WIDTH - 1]));
         add_(state, W_);
@@ -401,14 +401,14 @@ void PoseidonGoldilocks::hash_full_result_neon(Goldilocks::Element *state, const
         pow7_neon(st);
         add_neon(st, &(PoseidonGoldilocksConstants::C[(HALF_N_FULL_ROUNDS + 1) * SPONGE_WIDTH + N_PARTIAL_ROUNDS + r * SPONGE_WIDTH]));
         for (int i = 0; i < 6; ++i) N::store(&state[i * 2], st[i]);
-        mvp_(state, PoseidonGoldilocksConstants::M);
+        mvp_neon(state, PoseidonGoldilocksConstants::M);
         for (int i = 0; i < 6; ++i) st[i] = N::load(&state[i * 2]);
     }
 
     // Final pow7 + mvp
     pow7_neon(st);
     for (int i = 0; i < 6; ++i) N::store(&state[i * 2], st[i]);
-    mvp_(state, PoseidonGoldilocksConstants::M);
+    mvp_neon(state, PoseidonGoldilocksConstants::M);
 }
 
 void PoseidonGoldilocks::linear_hash_neon(Goldilocks::Element *output, Goldilocks::Element *input, uint64_t size)
