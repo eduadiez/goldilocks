@@ -164,6 +164,91 @@ kernel void ntt_rev_butterfly_s1(
     dst[(pair_idx * 2u + 1u) * ncols + col] = gl_sub(u, t);
 }
 
+// ---- kernel: ntt_radix4_phase ---------------------------------------------
+// Combines two consecutive radix-2 DIT stages (s and s+1) into ONE pass over
+// the data. Produces the same output as running ntt_butterfly_phase twice at
+// s and s+1. Saves half the memory read+write traffic of the butterfly loop.
+//
+// Derivation: for quad-butterfly index q within combined group of size
+// M = 2^(s+1):
+//   x_A0 = buf[g*M + q]            (sub-group A, pre-s)
+//   x_A1 = buf[g*M + q + M/4]
+//   x_B0 = buf[g*M + q + M/2]      (sub-group B)
+//   x_B1 = buf[g*M + q + 3M/4]
+//
+// Stage s butterflies (within sub-groups A and B), twiddle w_s = ω_{M/2}^q:
+//   y_A0 = x_A0 + w_s*x_A1,  y_A1 = x_A0 - w_s*x_A1
+//   y_B0 = x_B0 + w_s*x_B1,  y_B1 = x_B0 - w_s*x_B1
+//
+// Stage s+1 outer butterflies, twiddles w_q = ω_M^q, w_q_I = ω_M^(q+M/4):
+//   z_0 = y_A0 + w_q*y_B0     → goes to buf[g*M + q]
+//   z_1 = y_A1 + w_q_I*y_B1   → goes to buf[g*M + q + M/4]
+//   z_2 = y_A0 - w_q*y_B0     → goes to buf[g*M + q + M/2]
+//   z_3 = y_A1 - w_q_I*y_B1   → goes to buf[g*M + q + 3M/4]
+//
+// Twiddle reads (stride_s1 = s_global - (s+1)):
+//   w_s   = twiddles[q << (stride_s1 + 1)]     // = ω_{M/2}^q = ω_M^(2q)
+//   w_q   = twiddles[q << stride_s1]           // = ω_M^q
+//   w_q_I = twiddles[(q + M/4) << stride_s1]   // = ω_M^q * I (precomputed in table)
+//
+// Dispatch: (domain_size/4) * ncols threads. Thread tid handles one
+// (quad-butterfly, column) pair.
+kernel void ntt_radix4_phase(
+    device ulong*         buf            [[ buffer(0) ]],
+    device const ulong*   twiddles       [[ buffer(1) ]],
+    constant uint&        ncols          [[ buffer(2) ]],
+    constant uint&        domain_size    [[ buffer(3) ]],
+    constant uint&        s              [[ buffer(4) ]],
+    constant uint&        stride_s1      [[ buffer(5) ]],
+    uint tid [[ thread_position_in_grid ]]
+) {
+    uint quarter = domain_size >> 2u;
+    uint total = quarter * ncols;
+    if (tid >= total) return;
+
+    uint idx = tid / ncols;
+    uint col = tid % ncols;
+
+    uint M       = 1u << (s + 1u);    // combined group size
+    uint M_div_4 = M >> 2u;
+    uint M_div_2 = M >> 1u;
+
+    uint g = idx / M_div_4;
+    uint q = idx % M_div_4;
+
+    // Position offsets within the buffer (scaled by ncols for stride)
+    uint base_elem = g * M + q;
+    uint offA0 = base_elem * ncols + col;
+    uint offA1 = (base_elem + M_div_4) * ncols + col;
+    uint offB0 = (base_elem + M_div_2) * ncols + col;
+    uint offB1 = (base_elem + M_div_2 + M_div_4) * ncols + col;
+
+    ulong x_A0 = buf[offA0];
+    ulong x_A1 = buf[offA1];
+    ulong x_B0 = buf[offB0];
+    ulong x_B1 = buf[offB1];
+
+    ulong w_s   = twiddles[q << (stride_s1 + 1u)];
+    ulong w_q   = twiddles[q << stride_s1];
+    ulong w_q_I = twiddles[(q + M_div_4) << stride_s1];
+
+    // Stage s
+    ulong t_A1 = gl_mul(x_A1, w_s);
+    ulong t_B1 = gl_mul(x_B1, w_s);
+    ulong y_A0 = gl_add(x_A0, t_A1);
+    ulong y_A1 = gl_sub(x_A0, t_A1);
+    ulong y_B0 = gl_add(x_B0, t_B1);
+    ulong y_B1 = gl_sub(x_B0, t_B1);
+
+    // Stage s+1
+    ulong t_B0  = gl_mul(y_B0, w_q);
+    ulong t_B1p = gl_mul(y_B1, w_q_I);
+    buf[offA0] = gl_add(y_A0, t_B0);
+    buf[offA1] = gl_add(y_A1, t_B1p);
+    buf[offB0] = gl_sub(y_A0, t_B0);
+    buf[offB1] = gl_sub(y_A1, t_B1p);
+}
+
 // ---- kernel: intt_reorder_scale -------------------------------------------
 // Fused INTT finalization: combines the (N-i) % N reorder and the 1/N scale
 // into one in-place pass. Saves one full read+write pass over the buffer

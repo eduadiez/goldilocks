@@ -707,35 +707,66 @@ void metal_dispatch_ntt_butterfly_all_phases(MetalCtxHandle ctx,
                                               uint32_t start_s,
                                               uint32_t domain_pow,
                                               uint32_t s_global) {
-    if (start_s > domain_pow) return;  // nothing to do
+    if (start_s > domain_pow) return;
     @autoreleasepool {
         GoldilocksMetalContext* impl = get_impl(ctx);
-        id<MTLComputePipelineState> pso =
+        id<MTLComputePipelineState> pso_r2 =
             (__bridge id<MTLComputePipelineState>)(
                 metal_context_pipeline(ctx, "ntt_butterfly_phase"));
+        id<MTLComputePipelineState> pso_r4 =
+            (__bridge id<MTLComputePipelineState>)(
+                metal_context_pipeline(ctx, "ntt_radix4_phase"));
 
-        uint32_t half  = domain_size >> 1;
-        uint32_t total = half * ncols;
+        uint32_t half    = domain_size >> 1;
+        uint32_t quarter = domain_size >> 2;
+        uint32_t total_r2 = half    * ncols;
+        uint32_t total_r4 = quarter * ncols;
 
         id<MTLCommandBuffer>        cmd = [impl->_queue commandBuffer];
         id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-        [enc setComputePipelineState:pso];
+
         [enc setBuffer:(__bridge id<MTLBuffer>)(buf)      offset:0 atIndex:0];
         [enc setBuffer:(__bridge id<MTLBuffer>)(twiddles) offset:0 atIndex:1];
         [enc setBytes:&ncols       length:sizeof(uint32_t) atIndex:2];
         [enc setBytes:&domain_size length:sizeof(uint32_t) atIndex:3];
 
-        NSUInteger tpg    = threadgroup_size_for(pso, 64);
-        NSUInteger groups = ((NSUInteger)total + tpg - 1) / tpg;
+        NSUInteger tpg_r2 = threadgroup_size_for(pso_r2, 64);
+        NSUInteger tpg_r4 = threadgroup_size_for(pso_r4, 64);
+        NSUInteger groups_r2 = ((NSUInteger)total_r2 + tpg_r2 - 1) / tpg_r2;
+        NSUInteger groups_r4 = ((NSUInteger)total_r4 + tpg_r4 - 1) / tpg_r4;
 
-        for (uint32_t s = start_s; s <= domain_pow; s++) {
-            uint32_t stride_shift = s_global - s;
-            [enc setBytes:&s            length:sizeof(uint32_t) atIndex:4];
-            [enc setBytes:&stride_shift length:sizeof(uint32_t) atIndex:5];
-            [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
-               threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
-            if (s < domain_pow) {
-                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        // Radix-4 dispatches half the number of threads but each does ~2×
+        // the per-thread work (higher register pressure). At very small N
+        // the larger per-thread cost isn't amortized; empirically the
+        // crossover is around N = 2^15 on Apple M4 Pro. Below that, stay on
+        // the plain radix-2 butterfly.
+        const uint32_t R4_MIN_DOMAIN_POW = 15;
+        bool use_radix4 = (domain_pow >= R4_MIN_DOMAIN_POW);
+
+        uint32_t s = start_s;
+        bool first = true;
+        while (s <= domain_pow) {
+            if (!first) [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            first = false;
+
+            if (use_radix4 && s + 1 <= domain_pow && quarter > 0) {
+                // Radix-4: combines stages s and s+1 into one pass
+                [enc setComputePipelineState:pso_r4];
+                uint32_t stride_s1 = s_global - (s + 1);
+                [enc setBytes:&s         length:sizeof(uint32_t) atIndex:4];
+                [enc setBytes:&stride_s1 length:sizeof(uint32_t) atIndex:5];
+                [enc dispatchThreadgroups:MTLSizeMake(groups_r4, 1, 1)
+                   threadsPerThreadgroup:MTLSizeMake(tpg_r4, 1, 1)];
+                s += 2;
+            } else {
+                // Radix-2 tail or small-N path
+                [enc setComputePipelineState:pso_r2];
+                uint32_t stride_shift = s_global - s;
+                [enc setBytes:&s            length:sizeof(uint32_t) atIndex:4];
+                [enc setBytes:&stride_shift length:sizeof(uint32_t) atIndex:5];
+                [enc dispatchThreadgroups:MTLSizeMake(groups_r2, 1, 1)
+                   threadsPerThreadgroup:MTLSizeMake(tpg_r2, 1, 1)];
+                s += 1;
             }
         }
 
