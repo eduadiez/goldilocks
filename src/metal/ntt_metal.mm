@@ -106,50 +106,51 @@ void NTT_Metal(Goldilocks::Element* dst,
         (void)rlen;
 
         size_t data_bytes = size * ncols * sizeof(Goldilocks::Element);
+        uint32_t ncols32  = (uint32_t)ncols;
+        uint32_t domain32 = (uint32_t)size;
 
-        // -------------------------------------------------------------------
-        // 1. Copy src -> dst on CPU (we need dst as staging area for GPU work).
-        //    GPU works in-place on dst's buffer.
-        // -------------------------------------------------------------------
-        if (dst != src) {
-            std::memcpy(dst, src, data_bytes);
-        }
-
-        // -------------------------------------------------------------------
-        // 2. Alias / copy dst into a Metal buffer.
-        // -------------------------------------------------------------------
         int dst_is_copy = 0;
         MetalBufHandle dst_buf = metal_buf_alias(ctx, (void*)dst, data_bytes, &dst_is_copy);
 
-        uint32_t ncols32      = (uint32_t)ncols;
-        uint32_t domain32     = (uint32_t)size;
-
         // -------------------------------------------------------------------
-        // 3. Bit-reverse permutation.
-        // -------------------------------------------------------------------
-        metal_dispatch_ntt_reverse_permutation(ctx, dst_buf, domainPow, ncols32);
-
-        // -------------------------------------------------------------------
-        // 4. Butterfly phases s = 1 .. domainPow.
-        //    Stage the FULL roots[0..roots_len-1] array ONCE per call via the
-        //    twiddle cache (keyed by roots_len, so repeat calls at the same
-        //    size are free). Each phase dispatch passes the same buffer and
-        //    a per-phase stride shift = s_global - s. The kernel reads
-        //    twiddles[j << shift] to get root(s, j) directly.
+        // Fused-path (preferred): src ≠ dst. Skip the memcpy + reverse +
+        // phase-1 butterfly (three passes over the data) and do all three
+        // in one pass via ntt_rev_butterfly_s1.
         //
-        //    This replaces the original per-phase allocate/copy/release of
-        //    mdiv2 twiddles, which dominated small-N and multi-column runs.
+        // Fallback: src == dst (in-place). memcpy is a no-op, we must
+        // run the legacy reverse-permutation + full phase loop.
         // -------------------------------------------------------------------
         MetalBufHandle tw_buf = metal_twiddle_buffer(
             ctx,
             reinterpret_cast<const uint64_t*>(roots_raw),
             rlen);
 
-        // All phases in one command buffer with a single waitUntilCompleted.
-        metal_dispatch_ntt_butterfly_all_phases(
-            ctx, dst_buf, tw_buf,
-            ncols32, domain32, domainPow, s_global);
-        // tw_buf is owned by the context's twiddle cache — do NOT release.
+        if (dst != src && domainPow >= 1) {
+            // Alias src read-only; the fused kernel reads natural-order src
+            // and writes bit-reverse-permuted + s=1-butterflied dst in one pass.
+            int src_is_copy = 0;
+            MetalBufHandle src_buf = metal_buf_alias(ctx, (void*)src,
+                                                      data_bytes, &src_is_copy);
+
+            metal_dispatch_ntt_rev_butterfly_s1(
+                ctx, src_buf, dst_buf, domainPow, ncols32);
+
+            // Continue from phase s=2.
+            metal_dispatch_ntt_butterfly_all_phases(
+                ctx, dst_buf, tw_buf,
+                ncols32, domain32,
+                /*start_s=*/2, domainPow, s_global);
+
+            metal_buf_release(src_buf);
+        } else {
+            // In-place path (src == dst) or trivial N=1.
+            if (dst != src) std::memcpy(dst, src, data_bytes);
+            metal_dispatch_ntt_reverse_permutation(ctx, dst_buf, domainPow, ncols32);
+            metal_dispatch_ntt_butterfly_all_phases(
+                ctx, dst_buf, tw_buf,
+                ncols32, domain32,
+                /*start_s=*/1, domainPow, s_global);
+        }
 
         // -------------------------------------------------------------------
         // 5. Inverse NTT: scale each element by 1/N mod p.

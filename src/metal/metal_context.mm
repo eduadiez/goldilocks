@@ -580,6 +580,39 @@ void metal_dispatch_ntt_reverse_permutation(MetalCtxHandle ctx,
 // ---------------------------------------------------------------------------
 // ntt_butterfly_phase dispatch
 // ---------------------------------------------------------------------------
+void metal_dispatch_ntt_rev_butterfly_s1(MetalCtxHandle ctx,
+                                          MetalBufHandle src,
+                                          MetalBufHandle dst,
+                                          uint32_t domain_pow,
+                                          uint32_t ncols) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        id<MTLComputePipelineState> pso =
+            (__bridge id<MTLComputePipelineState>)(
+                metal_context_pipeline(ctx, "ntt_rev_butterfly_s1"));
+
+        uint32_t half  = (1u << domain_pow) >> 1;
+        uint32_t total = half * ncols;
+
+        id<MTLCommandBuffer>        cmd = [impl->_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(src) offset:0 atIndex:0];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(dst) offset:0 atIndex:1];
+        [enc setBytes:&domain_pow length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&ncols      length:sizeof(uint32_t) atIndex:3];
+
+        NSUInteger tpg    = threadgroup_size_for(pso, 64);
+        NSUInteger groups = ((NSUInteger)total + tpg - 1) / tpg;
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+}
+
 // Batched: encode ALL phases s = 1..domainPow into a single command buffer
 // with one waitUntilCompleted at the end. Eliminates `log N` per-phase
 // commit/wait round-trips (~150μs each) that dominated small-N runs.
@@ -590,8 +623,10 @@ void metal_dispatch_ntt_butterfly_all_phases(MetalCtxHandle ctx,
                                               MetalBufHandle twiddles,
                                               uint32_t ncols,
                                               uint32_t domain_size,
+                                              uint32_t start_s,
                                               uint32_t domain_pow,
                                               uint32_t s_global) {
+    if (start_s > domain_pow) return;  // nothing to do
     @autoreleasepool {
         GoldilocksMetalContext* impl = get_impl(ctx);
         id<MTLComputePipelineState> pso =
@@ -599,7 +634,7 @@ void metal_dispatch_ntt_butterfly_all_phases(MetalCtxHandle ctx,
                 metal_context_pipeline(ctx, "ntt_butterfly_phase"));
 
         uint32_t half  = domain_size >> 1;
-        uint32_t total = half * ncols;  // total threads per phase
+        uint32_t total = half * ncols;
 
         id<MTLCommandBuffer>        cmd = [impl->_queue commandBuffer];
         id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
@@ -612,7 +647,7 @@ void metal_dispatch_ntt_butterfly_all_phases(MetalCtxHandle ctx,
         NSUInteger tpg    = threadgroup_size_for(pso, 64);
         NSUInteger groups = ((NSUInteger)total + tpg - 1) / tpg;
 
-        for (uint32_t s = 1; s <= domain_pow; s++) {
+        for (uint32_t s = start_s; s <= domain_pow; s++) {
             uint32_t stride_shift = s_global - s;
             [enc setBytes:&s            length:sizeof(uint32_t) atIndex:4];
             [enc setBytes:&stride_shift length:sizeof(uint32_t) atIndex:5];

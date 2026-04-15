@@ -167,12 +167,23 @@ static void bench_one_size(uint64_t ncols, uint64_t nrows, int iters) {
         tree, n_tree, iters);
     g_merkle_use_simd_coop = 0;
 
+    // Metal, row kernel with PAGE-ALIGNED buffers (zero-copy MTLBuffer alias)
+    auto* cols_al = goldilocks_metal::allocate_aligned_elements(n_elem);
+    auto* tree_al = goldilocks_metal::allocate_aligned_elements(n_tree);
+    build_fibonacci(cols_al, ncols, nrows);
+    Result r_alig = time_run(
+        [&]{ PoseidonGoldilocks::merkletree_metal(tree_al, cols_al, ncols, nrows); },
+        tree_al, n_tree, iters);
+    goldilocks_metal::free_aligned(cols_al);
+    goldilocks_metal::free_aligned(tree_al);
+
     const char* check_seq_neon  = (r_seq.root0 == r_neon.root0)  ? "match" : "DIVERGE";
     const char* check_seq_metal = (r_seq.root0 == r_metal.root0) ? "match" : "DIVERGE";
     const char* check_seq_coop  = (r_seq.root0 == r_coop.root0)  ? "match" : "DIVERGE";
     const char* check_seq_x2    = (r_seq.root0 == r_x2.root0)    ? "match" : "DIVERGE";
     const char* check_seq_cm    = (r_seq.root0 == r_cm.root0)    ? "match" : "DIVERGE";
     const char* check_seq_tg    = (r_seq.root0 == r_tg.root0)    ? "match" : "DIVERGE";
+    const char* check_seq_alig  = (r_seq.root0 == r_alig.root0)  ? "match" : "DIVERGE";
 
     printf("\n=== Merkle  ncols=%llu  nrows=%llu  (iters=%d) ===\n",
            (unsigned long long)ncols, (unsigned long long)nrows, iters);
@@ -207,6 +218,11 @@ static void bench_one_size(uint64_t ncols, uint64_t nrows, int iters) {
            r_neon.ms  > 0 ? r_neon.ms  / r_tg.ms : 0.0,
            r_metal.ms > 0 ? r_metal.ms / r_tg.ms : 0.0,
            check_seq_tg);
+    printf("  metal+aligned: %10.3f ms   (%5.2fx vs neon, %5.2fx vs metal-row, check=%s)\n",
+           r_alig.ms,
+           r_neon.ms  > 0 ? r_neon.ms  / r_alig.ms : 0.0,
+           r_metal.ms > 0 ? r_metal.ms / r_alig.ms : 0.0,
+           check_seq_alig);
 
     delete[] cols;
     delete[] tree;

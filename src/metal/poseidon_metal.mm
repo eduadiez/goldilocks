@@ -25,6 +25,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <stdlib.h>
 
 #include "../goldilocks_base_field.hpp"
 #include "metal_context.hpp"
@@ -154,6 +155,35 @@ void merkletree_metal(Goldilocks::Element* tree,
         metal_buf_release(input_buf);
         metal_buf_release(tree_buf);
     }  // @autoreleasepool
+}
+
+// ---------------------------------------------------------------------------
+// Page-aligned allocator for zero-copy MTLBuffer aliasing.
+//
+// MTLDevice `newBufferWithBytesNoCopy` requires the backing pointer to be
+// aligned to a VM page boundary (16 KB on Apple Silicon). When callers
+// allocate via `new Element[]` or `malloc`, alignment is typically 16 B
+// — far too small — so the Metal bridge falls back to a `newBufferWithBytes`
+// copy + readback. For large inputs/outputs the memcpy dominates.
+//
+// allocate_aligned_elements returns page-aligned memory so the bridge takes
+// the zero-copy path automatically.
+//
+// Implementation: posix_memalign with 16 KB alignment, rounded up to the
+// nearest page (posix_memalign doesn't require size to be a multiple of
+// alignment on modern libc, but some older libs do).
+Goldilocks::Element* allocate_aligned_elements(uint64_t n) {
+    if (n == 0) return nullptr;
+    constexpr size_t PAGE = 16384;
+    size_t bytes = n * sizeof(Goldilocks::Element);
+    size_t aligned = (bytes + PAGE - 1) & ~(PAGE - 1);
+    void* p = nullptr;
+    if (posix_memalign(&p, PAGE, aligned) != 0) return nullptr;
+    return reinterpret_cast<Goldilocks::Element*>(p);
+}
+
+void free_aligned(void* ptr) {
+    free(ptr);
 }
 
 }  // namespace goldilocks_metal

@@ -118,6 +118,52 @@ kernel void ntt_butterfly_phase(
     buf[off1] = gl_sub(u, t);
 }
 
+// ---- kernel: ntt_rev_butterfly_s1 -----------------------------------------
+// Fused kernel: reads input in natural order, writes bit-reverse-permuted
+// AND phase-1 butterfly output. Replaces two separate passes
+// (ntt_reverse_permutation + ntt_butterfly_phase with s=1) with a single
+// pass, saving one full N-element read+write cycle plus one commit.
+//
+// Why this works: at phase s=1, mdiv2=1, so each butterfly pair uses
+// twiddle index j=0, and root(1, 0) = roots[0] = 1 — the twiddle
+// multiplication is a no-op. The s=1 butterfly reduces to just
+// gl_add/gl_sub of two bit-reversed-position inputs.
+//
+// Requires src ≠ dst (out-of-place). Caller guarantees via
+// the usual memcpy(dst, src) path, but reads from src directly here
+// to save one memcpy pass.
+//
+// Dispatch: (domain_size / 2) × ncols threads. Thread tid handles one
+// (butterfly-pair, column) pair.
+kernel void ntt_rev_butterfly_s1(
+    device const ulong* src        [[ buffer(0) ]],  // input (natural order)
+    device       ulong* dst        [[ buffer(1) ]],  // output (perm + s=1 butterfly)
+    constant     uint&  domain_pow [[ buffer(2) ]],
+    constant     uint&  ncols      [[ buffer(3) ]],
+    uint tid [[ thread_position_in_grid ]]
+) {
+    uint half_n = (1u << domain_pow) >> 1;
+    uint total  = half_n * ncols;
+    if (tid >= total) return;
+
+    uint pair_idx = tid / ncols;
+    uint col      = tid % ncols;
+
+    // After bit-reversal, the butterfly pair at natural positions
+    // (2*pair_idx, 2*pair_idx+1) comes from src positions
+    //   reverse_bits(2*pair_idx)   >> (32 - domain_pow)
+    //   reverse_bits(2*pair_idx+1) >> (32 - domain_pow)
+    uint shift = 32u - domain_pow;
+    uint src_a = reverse_bits32(pair_idx * 2u)     >> shift;
+    uint src_b = reverse_bits32(pair_idx * 2u + 1u) >> shift;
+
+    ulong u = src[src_a * ncols + col];
+    ulong t = src[src_b * ncols + col];  // twiddle = 1 at s=1, no mul needed
+
+    dst[(pair_idx * 2u)     * ncols + col] = gl_add(u, t);
+    dst[(pair_idx * 2u + 1u) * ncols + col] = gl_sub(u, t);
+}
+
 // ---- kernel: intt_reorder --------------------------------------------------
 // Inverse-NTT index permutation: out[(N - i) % N] = in[i].
 // CPU reference: NTT_iters uses intt_idx(i,N) = (N - i) % N before INTT scale

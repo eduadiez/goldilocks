@@ -182,6 +182,16 @@ void metal_dispatch_ntt_reverse_permutation(MetalCtxHandle ctx,
                                              uint32_t domainPow,
                                              uint32_t ncols);
 
+// ntt_rev_butterfly_s1: fused kernel that reads `src` in natural order and
+// writes `dst` = output of (reverse-permutation ∘ phase-1 butterfly).
+// Saves one full pass vs the separate reverse + s=1 butterfly dispatches.
+// Must have src ≠ dst. Dispatch: (domain_size/2 * ncols) threads.
+void metal_dispatch_ntt_rev_butterfly_s1(MetalCtxHandle ctx,
+                                          MetalBufHandle src,
+                                          MetalBufHandle dst,
+                                          uint32_t domain_pow,
+                                          uint32_t ncols);
+
 // ntt_butterfly_phase: one thread per (butterfly pair, col) = domain_size/2 * ncols.
 //   buf                 = data buffer [domain_size * ncols]  (buffer(0))
 //   twiddles            = full roots array [1 << s_global]    (buffer(1))
@@ -201,14 +211,16 @@ void metal_dispatch_ntt_butterfly_phase(MetalCtxHandle ctx,
                                          uint32_t s,
                                          uint32_t roots_stride_shift);
 
-// Batched variant: encode ALL phases s = 1..domain_pow in one command buffer
-// with a single waitUntilCompleted. Preferred over per-phase dispatch for
-// small-to-medium N where per-phase commit overhead dominates.
+// Batched variant: encode phases s = start_s..domain_pow in one command
+// buffer with a single waitUntilCompleted. Pass start_s=1 for a full NTT,
+// or start_s=2 if the s=1 phase was already consumed by the fused
+// ntt_rev_butterfly_s1 kernel.
 void metal_dispatch_ntt_butterfly_all_phases(MetalCtxHandle ctx,
                                               MetalBufHandle buf,
                                               MetalBufHandle twiddles,
                                               uint32_t ncols,
                                               uint32_t domain_size,
+                                              uint32_t start_s,
                                               uint32_t domain_pow,
                                               uint32_t s_global);
 
