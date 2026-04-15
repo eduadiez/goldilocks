@@ -57,6 +57,26 @@ inline void PoseidonGoldilocks::mvp_neon(Goldilocks::Element *state,
     for (int i = 0; i < 6; ++i) N::store(&state[i * 2], out[i]);
 }
 
+// Phase 1c: 2-hash-parallel NEON matrix-vector product.
+// Layout: st[k] = {stA[k], stB[k]} for k=0..11. Processes 2 independent
+// Poseidon hashes per NEON register; doubles throughput when merkle rows pair up.
+inline void PoseidonGoldilocks::mvp_neon_2(uint64x2_t st[12],
+    const Goldilocks::Element mat[SPONGE_WIDTH][SPONGE_WIDTH])
+{
+    using N = goldilocks::simd::GLSimd<goldilocks::simd::Neon>;
+    uint64x2_t old[12];
+    for (int k = 0; k < 12; ++k) old[k] = st[k];
+
+    for (int k = 0; k < 12; ++k) {
+        uint64x2_t acc = N::splat(0);
+        for (int j = 0; j < 12; ++j) {
+            uint64x2_t m_jk = N::splat(mat[j][k].fe);
+            acc = N::add(acc, N::mul(m_jk, old[j]));
+        }
+        st[k] = acc;
+    }
+}
+
 // NEON dot product: sum_{i=0..11} x[i] * C[i].
 // Lane-parallel multiply-accumulate, horizontal reduce at the end.
 inline Goldilocks::Element PoseidonGoldilocks::dot_neon(const Goldilocks::Element *x,

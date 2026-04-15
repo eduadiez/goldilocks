@@ -40,6 +40,7 @@ private:
     inline void static pow7_neon(uint64x2_t st[6]);
     inline void static mvp_neon(Goldilocks::Element *state, const Goldilocks::Element mat[SPONGE_WIDTH][SPONGE_WIDTH]);
     inline Goldilocks::Element static dot_neon(const Goldilocks::Element *x, const Goldilocks::Element C[SPONGE_WIDTH]);
+    inline void static mvp_neon_2(uint64x2_t st[12], const Goldilocks::Element mat[SPONGE_WIDTH][SPONGE_WIDTH]);
 #endif // GOLDILOCKS_HAS_NEON
 
 #ifdef __AVX512__
@@ -74,8 +75,15 @@ public:
 
 #ifdef GOLDILOCKS_HAS_NEON
     void static hash_full_result_neon(Goldilocks::Element *, const Goldilocks::Element *);
+    void static hash_full_result_neon_2(
+        Goldilocks::Element *state_A, const Goldilocks::Element *input_A,
+        Goldilocks::Element *state_B, const Goldilocks::Element *input_B);
     inline void static hash_neon(Goldilocks::Element (&state)[CAPACITY], const Goldilocks::Element (&input)[SPONGE_WIDTH]);
     void static linear_hash_neon(Goldilocks::Element *output, Goldilocks::Element *input, uint64_t size);
+    // Phase 1c: 2-row linear-hash. Assumes both rows have the same size.
+    void static linear_hash_neon_pair(Goldilocks::Element *out_A, Goldilocks::Element *in_A,
+                                       Goldilocks::Element *out_B, Goldilocks::Element *in_B,
+                                       uint64_t size);
     void static merkletree_neon(Goldilocks::Element *tree, Goldilocks::Element *input, uint64_t num_cols, uint64_t num_rows, int nThreads = 0, uint64_t dim = 1);
     void static merkletree_batch_neon(Goldilocks::Element *tree, Goldilocks::Element *input, uint64_t num_cols, uint64_t num_rows, uint64_t batch_size, int nThreads = 0, uint64_t dim = 1);
 #endif // GOLDILOCKS_HAS_NEON
