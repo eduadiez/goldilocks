@@ -66,6 +66,37 @@ the kernel/framework boundary). But no `cblas_lgemm` for i64 × i64 exists.
 Accelerate's `BNNS` ML primitives are i8/i16 quantized and can't represent
 Goldilocks elements.
 
+### 5. Sudo / root — still blocked
+
+```
+$ sudo ./01_stream_nop
+about to enter streaming mode...
+zsh: illegal hardware instruction  sudo ./01_stream_nop
+
+$ sudo ./02_zero_za
+about to svzero_za()...
+zsh: illegal hardware instruction  sudo ./02_zero_za
+
+$ sudo ./03_i16_i64_matmul
+probe 3: SME i16×i16→i64 outer-product timing
+zsh: illegal hardware instruction  sudo ./03_i16_i64_matmul
+```
+
+Running as root (uid 0) does **not** unlock SME. The block is enforced at
+the kernel/entitlement layer, not by process privileges. This matches
+Apple's pattern for reserving new ARM features — for example, PAC and BTI
+were similarly gated behind code-signing entitlements during their
+introduction.
+
+Possible paths (none immediately actionable):
+
+1. **Entitlement discovery**: find the plist key Apple uses internally. No
+   public documentation as of macOS 26.3.1.
+2. **Beta macOS**: maybe macOS 27 exposes SME. Untested.
+3. **Asahi Linux on M4**: Linux exposes SME via `prctl(PR_SME_SET_VL)`;
+   running the workload on Asahi would work, but breaks our "macOS
+   primary" target.
+
 ## Conclusion
 
 **Apple matrix extensions cannot be used for Goldilocks NEON Poseidon on macOS
