@@ -63,10 +63,10 @@ inline void PoseidonGoldilocks::mvp_neon(Goldilocks::Element *state,
     for (int i = 0; i < 6; ++i) out[i] = N::splat(0);
 
     if (mat_is_small) {
-        // Phase 1m: bulk-reduce for single-hash mvp. Same idea as mvp_neon_2:
-        // accumulate raw partials, reduce once. Uses the dual-lane helper even
-        // for single-hash (both lanes carry the same state value so both compute
-        // the same result — redundant but avoids a separate code path).
+        // Phase 1m single-hash path: __uint128_t in C (compiler schedules mul+umulh).
+        // Tried asm variant in Phase 1n; regressed — clang's own scheduling is
+        // better here because the 3-operand (a, m0, m1) structure doesn't benefit
+        // from forcing asm.
         for (int i = 0; i < 6; ++i) {
             uint64_t sum_lo0 = 0, sum_hi0 = 0, carries0 = 0;
             uint64_t sum_lo1 = 0, sum_hi1 = 0, carries1 = 0;
@@ -74,9 +74,6 @@ inline void PoseidonGoldilocks::mvp_neon(Goldilocks::Element *state,
                 uint64_t a = old_state[j].fe;
                 uint64_t m0 = mat[j][i * 2].fe;
                 uint64_t m1 = mat[j][i * 2 + 1].fe;
-                // Use m0 for lane 0, m1 for lane 1. Can't use the pair helper
-                // because it assumes same m for both; fall back to two
-                // single-lane accumulations inline.
                 uint64_t lo0 = a * m0;
                 uint64_t lo1 = a * m1;
                 uint64_t hi0 = (uint64_t)(((__uint128_t)a * m0) >> 64);
