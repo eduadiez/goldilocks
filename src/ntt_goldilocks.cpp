@@ -1,4 +1,7 @@
 #include "ntt_goldilocks.hpp"
+#ifdef GOLDILOCKS_HAS_NEON
+#include "simd/goldilocks_simd.hpp"
+#endif
 
 static inline u_int64_t BR(u_int64_t x, u_int64_t domainPow)
 {
@@ -100,7 +103,20 @@ void NTT_Goldilocks::NTT_iters(Goldilocks::Element *dst, Goldilocks::Element *sr
                     j = j % mdiv2;
 
                     Goldilocks::Element w = root(s + si, j);
-                    for (u_int64_t k = 0; k < ncols; ++k)
+                    u_int64_t k = 0;
+#ifdef GOLDILOCKS_HAS_NEON
+                    // Phase 2a: NEON fast path — 2 butterflies per iter.
+                    // Fused mul+add/sub over 2 consecutive columns using our NEON primitives.
+                    using N = goldilocks::simd::GLSimd<goldilocks::simd::Neon>;
+                    uint64x2_t w_vec = N::splat(w.fe);
+                    for (; k + 1 < ncols; k += 2) {
+                        uint64x2_t t = N::mul(N::load(&a[offset1 + k]), w_vec);
+                        uint64x2_t u = N::load(&a[offset2 + k]);
+                        N::store(&a[offset2 + k], N::add(u, t));
+                        N::store(&a[offset1 + k], N::sub(u, t));
+                    }
+#endif
+                    for (; k < ncols; ++k)
                     {
                         Goldilocks::Element t = w * a[offset1 + k];
                         Goldilocks::Element u = a[offset2 + k];
