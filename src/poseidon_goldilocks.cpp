@@ -600,12 +600,28 @@ void PoseidonGoldilocks::merkletree_neon(Goldilocks::Element *tree, Goldilocks::
         linear_hash_neon(&cursor[i * CAPACITY], &input[i * num_cols * dim], num_cols * dim);
     }
 
+    // Phase 1i: pair-hash for tree rebuild as well. Adjacent output slots are
+    // independent hashes over independent pol_inputs; pair them via
+    // hash_full_result_neon_2. Odd tail uses single-hash fallback.
     uint64_t pending = num_rows;
     uint64_t nextN = floor((pending - 1) / 2) + 1;
     uint64_t nextIndex = 0;
     while (pending > 1) {
+        uint64_t paired = nextN & ~uint64_t{1};
 #pragma omp parallel for num_threads(nThreads)
-        for (uint64_t i = 0; i < nextN; i++) {
+        for (uint64_t i = 0; i < paired; i += 2) {
+            Goldilocks::Element pol_A[SPONGE_WIDTH], pol_B[SPONGE_WIDTH];
+            memset(pol_A, 0, SPONGE_WIDTH * sizeof(Goldilocks::Element));
+            memset(pol_B, 0, SPONGE_WIDTH * sizeof(Goldilocks::Element));
+            std::memcpy(pol_A, &cursor[nextIndex + i       * RATE], RATE * sizeof(Goldilocks::Element));
+            std::memcpy(pol_B, &cursor[nextIndex + (i + 1) * RATE], RATE * sizeof(Goldilocks::Element));
+            Goldilocks::Element out_A[SPONGE_WIDTH], out_B[SPONGE_WIDTH];
+            hash_full_result_neon_2(out_A, pol_A, out_B, pol_B);
+            std::memcpy(&cursor[nextIndex + (pending + i      ) * CAPACITY], out_A, CAPACITY * sizeof(Goldilocks::Element));
+            std::memcpy(&cursor[nextIndex + (pending + i + 1  ) * CAPACITY], out_B, CAPACITY * sizeof(Goldilocks::Element));
+        }
+        if (nextN & 1) {
+            uint64_t i = nextN - 1;
             Goldilocks::Element pol_input[SPONGE_WIDTH];
             memset(pol_input, 0, SPONGE_WIDTH * sizeof(Goldilocks::Element));
             std::memcpy(pol_input, &cursor[nextIndex + i * RATE], RATE * sizeof(Goldilocks::Element));
@@ -639,12 +655,26 @@ void PoseidonGoldilocks::merkletree_batch_neon(Goldilocks::Element *tree, Goldil
         linear_hash_neon(&cursor[i * CAPACITY], buff0, nbatches * CAPACITY);
     }
 
+    // Phase 1i: pair-hash for batch tree rebuild.
     uint64_t pending = num_rows;
     uint64_t nextN = floor((pending - 1) / 2) + 1;
     uint64_t nextIndex = 0;
     while (pending > 1) {
+        uint64_t paired = nextN & ~uint64_t{1};
 #pragma omp parallel for num_threads(nThreads)
-        for (uint64_t i = 0; i < nextN; i++) {
+        for (uint64_t i = 0; i < paired; i += 2) {
+            Goldilocks::Element pol_A[SPONGE_WIDTH], pol_B[SPONGE_WIDTH];
+            memset(pol_A, 0, SPONGE_WIDTH * sizeof(Goldilocks::Element));
+            memset(pol_B, 0, SPONGE_WIDTH * sizeof(Goldilocks::Element));
+            std::memcpy(pol_A, &cursor[nextIndex + i       * RATE], RATE * sizeof(Goldilocks::Element));
+            std::memcpy(pol_B, &cursor[nextIndex + (i + 1) * RATE], RATE * sizeof(Goldilocks::Element));
+            Goldilocks::Element out_A[SPONGE_WIDTH], out_B[SPONGE_WIDTH];
+            hash_full_result_neon_2(out_A, pol_A, out_B, pol_B);
+            std::memcpy(&cursor[nextIndex + (pending + i      ) * CAPACITY], out_A, CAPACITY * sizeof(Goldilocks::Element));
+            std::memcpy(&cursor[nextIndex + (pending + i + 1  ) * CAPACITY], out_B, CAPACITY * sizeof(Goldilocks::Element));
+        }
+        if (nextN & 1) {
+            uint64_t i = nextN - 1;
             Goldilocks::Element pol_input[SPONGE_WIDTH];
             memset(pol_input, 0, SPONGE_WIDTH * sizeof(Goldilocks::Element));
             std::memcpy(pol_input, &cursor[nextIndex + i * RATE], RATE * sizeof(Goldilocks::Element));
