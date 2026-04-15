@@ -497,6 +497,221 @@ kernel void merkle_leaves_x2(
     }
 }
 
+// ---- kernel: transpose_rowmajor_to_colmajor -------------------------------
+// Transpose input from row-major [num_rows][ncols] to column-major
+// [ncols][num_rows]. This makes the subsequent coalesced-read kernel fast:
+// threads in a simdgroup read adjacent rows' values, which live at adjacent
+// addresses in column-major layout.
+//
+// Dispatch: one thread per (col, row) pair. Uses a threadgroup tile for
+// bandwidth-efficient transpose (classic TBDR pattern: read a 32x32 tile
+// coalesced, barrier, write the transposed tile coalesced).
+//
+// Tile size 32x32 chosen to match simdgroup width and fit comfortably in
+// threadgroup memory (32 * 32 * 8 = 8 KB per group, well under the limit).
+#define TRANSPOSE_TILE 32
+[[max_total_threads_per_threadgroup(TRANSPOSE_TILE * TRANSPOSE_TILE)]]
+kernel void transpose_rowmajor(
+    device const ulong* src      [[ buffer(0) ]],  // [num_rows][ncols]
+    device       ulong* dst      [[ buffer(1) ]],  // [ncols][num_rows]
+    constant     uint&  num_rows [[ buffer(2) ]],
+    constant     uint&  ncols    [[ buffer(3) ]],
+    uint2 tgid [[ threadgroup_position_in_grid ]],
+    uint2 ltid [[ thread_position_in_threadgroup ]]
+) {
+    threadgroup ulong tile[TRANSPOSE_TILE][TRANSPOSE_TILE + 1];  // +1 avoids bank conflicts
+
+    uint row = tgid.y * TRANSPOSE_TILE + ltid.y;
+    uint col = tgid.x * TRANSPOSE_TILE + ltid.x;
+
+    // Coalesced read: thread(ltid.x, ltid.y) reads src[row * ncols + col].
+    // Within a simdgroup (ltid.x varying), adjacent threads read adjacent
+    // addresses in the same row of src.
+    if (row < num_rows && col < ncols) {
+        tile[ltid.y][ltid.x] = src[row * ncols + col];
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Coalesced write: thread(ltid.x, ltid.y) writes to dst's transposed tile.
+    // We swap (ltid.x, ltid.y) for the output so writes stay coalesced.
+    uint out_row = tgid.x * TRANSPOSE_TILE + ltid.y;  // col index in src = row in dst
+    uint out_col = tgid.y * TRANSPOSE_TILE + ltid.x;  // row index in src = col in dst
+    if (out_row < ncols && out_col < num_rows) {
+        dst[out_row * num_rows + out_col] = tile[ltid.x][ltid.y];
+    }
+}
+
+// ---- kernel: merkle_leaves_cm ---------------------------------------------
+// Coalesced-read Merkle leaves: reads from column-major `inp_cm` layout.
+// inp_cm[j][i] = original inp[i][j], where j is col (0..ncols-1), i is row.
+// Threads in a simdgroup read adjacent entries (inp_cm[j * num_rows + i])
+// which are adjacent in memory — one coalesced transaction per memory read
+// instead of up to simd-width separate transactions.
+//
+// Dispatch: num_rows threads, same as the row-major kernel.
+[[max_total_threads_per_threadgroup(64)]]
+kernel void merkle_leaves_cm(
+    device const ulong* inp_cm   [[ buffer(0) ]],   // [ncols][num_rows]
+    device       ulong* tree     [[ buffer(1) ]],   // [num_rows][4]
+    constant     uint&  ncols    [[ buffer(2) ]],
+    constant     uint&  dim      [[ buffer(3) ]],
+    constant     uint&  num_rows [[ buffer(4) ]],
+    uint tid [[ thread_position_in_grid ]]
+) {
+    if (tid >= num_rows) return;
+    uint size = ncols * dim;
+
+    // Inline linear_hash but with column-major reads.
+    ulong out[4];
+    if (size <= 4) {
+        for (uint i = 0; i < size; i++) out[i] = inp_cm[i * num_rows + tid];
+        for (uint i = size; i < 4; i++) out[i] = 0UL;
+        for (int i = 0; i < 4; i++) tree[tid * 4 + i] = out[i];
+        return;
+    }
+
+    ulong state[12];
+    uint remaining = size;
+    bool first = true;
+    while (remaining > 0) {
+        if (first) {
+            for (int i = 8; i < 12; i++) state[i] = 0UL;
+            first = false;
+        } else {
+            for (int i = 0; i < 4; i++) state[8 + i] = out[i];
+        }
+        uint n = (remaining < 8) ? remaining : 8;
+        uint offset = size - remaining;
+        // Column-major reads: adjacent threads (adjacent tid) hit adjacent
+        // memory in each iteration → single coalesced transaction.
+        for (uint i = 0; i < n; i++) {
+            state[i] = inp_cm[(offset + i) * num_rows + tid];
+        }
+        for (uint i = n; i < 8; i++) state[i] = 0UL;
+
+        ulong tmp[12];
+        for (int i = 0; i < 12; i++) tmp[i] = state[i];
+        pod12(tmp);
+        for (int i = 0; i < 4; i++) out[i] = tmp[i];
+        for (int i = 0; i < 4; i++) state[i] = out[i];
+        remaining -= n;
+    }
+    // Canonicalize only the final output.
+    for (int i = 0; i < 4; i++) {
+        tree[tid * 4 + i] = gl_canonicalize(out[i]);
+    }
+}
+
+// ---- kernel: merkle_leaves_tg ---------------------------------------------
+// Cooperative tile-loaded variant: 32 threads per threadgroup (one per row),
+// each threadgroup handles 32 rows. At the top of each absorb iteration
+// (8 input elements per row), the 32 threads cooperatively load a
+// 32-row × 8-col tile from row-major global memory into threadgroup memory
+// using coalesced access (adjacent threads hit adjacent addresses in the
+// SAME row), then each thread reads its own 8-element slice from the tile.
+//
+// Total threadgroup memory: 32 × 8 × 8 bytes = 2 KB per group, trivial.
+// The load pattern turns ~32 uncoalesced memory transactions per simdgroup
+// into a single coalesced transaction per 32-element chunk.
+#define TG_ROWS 32
+#define ABSORB_RATE 8
+[[max_total_threads_per_threadgroup(TG_ROWS)]]
+kernel void merkle_leaves_tg(
+    device const ulong* inp      [[ buffer(0) ]],   // row-major [num_rows][ncols]
+    device       ulong* tree     [[ buffer(1) ]],
+    constant     uint&  ncols    [[ buffer(2) ]],
+    constant     uint&  dim      [[ buffer(3) ]],
+    constant     uint&  num_rows [[ buffer(4) ]],
+    uint tid     [[ thread_position_in_grid ]],
+    uint ltid    [[ thread_position_in_threadgroup ]],
+    uint tg_id   [[ threadgroup_position_in_grid ]]
+) {
+    // Tile holds one absorb chunk for the whole group: [row_in_tile][col].
+    threadgroup ulong tile[TG_ROWS][ABSORB_RATE];
+
+    uint row = tid;
+    bool active = (row < num_rows);
+    uint size = ncols * dim;
+    uint tg_base_row = tg_id * TG_ROWS;
+
+    // Short input bypass: memcpy + zero-pad. No cooperative loading needed.
+    if (size <= 4) {
+        if (active) {
+            for (uint i = 0; i < size; i++) {
+                tree[row * 4 + i] = inp[row * size + i];
+            }
+            for (uint i = size; i < 4; i++) tree[row * 4 + i] = 0UL;
+        }
+        return;
+    }
+
+    ulong state[12];
+    ulong out[4];
+    uint remaining = size;
+    bool first = true;
+
+    while (remaining > 0) {
+        uint offset = size - remaining;
+        uint n = (remaining < ABSORB_RATE) ? remaining : ABSORB_RATE;
+
+        // Cooperative load of 32 rows × n elements at current absorb offset.
+        // Thread t loads column `t` of the tile: tile[i][t] = inp[(tg_base_row+i)*size + offset + t]
+        // for i in [0, TG_ROWS). For t < n we load real data; t in [n, ABSORB_RATE) zeros.
+        //
+        // Access pattern: for fixed i (row within tile), threads 0..n-1 hit
+        // inp[(tg_base_row+i)*size + offset + 0..n-1] — adjacent addresses —
+        // in a SINGLE coalesced memory transaction per row.
+        #pragma unroll
+        for (uint i = 0; i < TG_ROWS; i++) {
+            uint src_row = tg_base_row + i;
+            if (ltid < n && src_row < num_rows) {
+                tile[i][ltid] = inp[(ulong)src_row * (ulong)size + (ulong)offset + (ulong)ltid];
+            } else if (ltid < ABSORB_RATE) {
+                tile[i][ltid] = 0UL;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Each thread assembles its own state[] for its row.
+        if (active) {
+            if (first) {
+                #pragma unroll
+                for (int i = 8; i < 12; i++) state[i] = 0UL;
+                first = false;
+            } else {
+                #pragma unroll
+                for (int i = 0; i < 4; i++) state[8 + i] = out[i];
+            }
+            #pragma unroll
+            for (uint i = 0; i < ABSORB_RATE; i++) {
+                state[i] = tile[ltid][i];
+            }
+
+            ulong tmp[12];
+            #pragma unroll
+            for (int i = 0; i < 12; i++) tmp[i] = state[i];
+            pod12(tmp);
+            #pragma unroll
+            for (int i = 0; i < 4; i++) out[i] = tmp[i];
+            #pragma unroll
+            for (int i = 0; i < 4; i++) state[i] = out[i];
+        }
+
+        remaining -= n;
+        // Next iteration re-uses tile; barrier required so no thread reloads
+        // before all finish consuming.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (active) {
+        #pragma unroll
+        for (int i = 0; i < 4; i++) {
+            tree[(ulong)row * 4 + (ulong)i] = gl_canonicalize(out[i]);
+        }
+    }
+}
+
 // ---- kernel: merkle_leaves -------------------------------------------------
 // One thread per leaf row i. Annotate with
 // [[max_total_threads_per_threadgroup(64)]] so the Metal compiler knows the

@@ -368,6 +368,103 @@ void metal_dispatch_merkle_parents(MetalCtxHandle ctx,
     }
 }
 
+void metal_dispatch_transpose_rowmajor(MetalCtxHandle ctx,
+                                        MetalBufHandle src_buf,
+                                        MetalBufHandle dst_buf,
+                                        uint32_t num_rows,
+                                        uint32_t ncols) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        id<MTLComputePipelineState> pso =
+            (__bridge id<MTLComputePipelineState>)(
+                metal_context_pipeline(ctx, "transpose_rowmajor"));
+
+        id<MTLCommandBuffer>        cmd = [impl->_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(src_buf) offset:0 atIndex:0];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(dst_buf) offset:0 atIndex:1];
+        [enc setBytes:&num_rows length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&ncols    length:sizeof(uint32_t) atIndex:3];
+
+        // 32x32 tile, one thread per (col, row) pair.
+        const NSUInteger TILE = 32;
+        NSUInteger tg_x = (ncols    + TILE - 1) / TILE;
+        NSUInteger tg_y = (num_rows + TILE - 1) / TILE;
+        [enc dispatchThreadgroups:MTLSizeMake(tg_x, tg_y, 1)
+           threadsPerThreadgroup:MTLSizeMake(TILE, TILE, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+}
+
+void metal_dispatch_merkle_leaves_cm(MetalCtxHandle ctx,
+                                      MetalBufHandle inp_cm_buf,
+                                      MetalBufHandle tree_buf,
+                                      uint32_t ncols,
+                                      uint32_t dim,
+                                      uint32_t num_rows) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        id<MTLComputePipelineState> pso =
+            (__bridge id<MTLComputePipelineState>)(
+                metal_context_pipeline(ctx, "merkle_leaves_cm"));
+
+        id<MTLCommandBuffer>        cmd = [impl->_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(inp_cm_buf) offset:0 atIndex:0];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(tree_buf)   offset:0 atIndex:1];
+        [enc setBytes:&ncols    length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&dim      length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&num_rows length:sizeof(uint32_t) atIndex:4];
+
+        NSUInteger tpg    = threadgroup_size_for(pso, 64);
+        NSUInteger groups = ((NSUInteger)num_rows + tpg - 1) / tpg;
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+}
+
+void metal_dispatch_merkle_leaves_tg(MetalCtxHandle ctx,
+                                      MetalBufHandle in_buf,
+                                      MetalBufHandle tree_buf,
+                                      uint32_t ncols,
+                                      uint32_t dim,
+                                      uint32_t num_rows) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        id<MTLComputePipelineState> pso =
+            (__bridge id<MTLComputePipelineState>)(
+                metal_context_pipeline(ctx, "merkle_leaves_tg"));
+
+        id<MTLCommandBuffer>        cmd = [impl->_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(in_buf)   offset:0 atIndex:0];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(tree_buf) offset:0 atIndex:1];
+        [enc setBytes:&ncols    length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&dim      length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&num_rows length:sizeof(uint32_t) atIndex:4];
+
+        // Fixed threadgroup size 32 (one simdgroup per 32-row tile).
+        NSUInteger tpg    = 32;
+        NSUInteger groups = ((NSUInteger)num_rows + tpg - 1) / tpg;
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+}
+
 void metal_dispatch_merkle_leaves_x2(MetalCtxHandle ctx,
                                       MetalBufHandle in_buf,
                                       MetalBufHandle tree_buf,

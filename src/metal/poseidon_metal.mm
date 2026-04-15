@@ -38,6 +38,7 @@
 //   0 = row-per-thread (default, shipped)
 //   1 = SIMD-cooperative
 //   2 = 2-rows-per-thread (ILP variant)
+//   3 = transpose + column-major (coalesced memory reads)
 extern "C" { __attribute__((weak)) int g_merkle_use_simd_coop = 0; }
 
 // Constants mirroring poseidon_goldilocks.hpp / merklehash_goldilocks.hpp
@@ -101,6 +102,26 @@ void merkletree_metal(Goldilocks::Element* tree,
                 break;
             case 2:
                 metal_dispatch_merkle_leaves_x2(ctx, input_buf, tree_buf,
+                                                 ncols32, dim32, nrows32);
+                break;
+            case 3: {
+                // Transpose input to column-major, then run coalesced-read
+                // kernel. Extra pass but unlocks simdgroup memory coalescing
+                // for the pod12 absorb loop (8 reads per thread × 16
+                // iterations per row, adjacent threads → adjacent addresses).
+                MetalBufHandle inp_cm = metal_buf_alloc(ctx, input_bytes);
+                metal_dispatch_transpose_rowmajor(ctx, input_buf, inp_cm,
+                                                   nrows32, ncols32);
+                metal_dispatch_merkle_leaves_cm(ctx, inp_cm, tree_buf,
+                                                 ncols32, dim32, nrows32);
+                metal_buf_release(inp_cm);
+                break;
+            }
+            case 4:
+                // Fused-tile: cooperative threadgroup load + pod12 in one
+                // kernel. Avoids the separate transpose pass's alloc and
+                // round-trip through global memory.
+                metal_dispatch_merkle_leaves_tg(ctx, input_buf, tree_buf,
                                                  ncols32, dim32, nrows32);
                 break;
             default:

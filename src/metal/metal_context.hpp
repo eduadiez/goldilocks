@@ -124,6 +124,37 @@ void metal_dispatch_merkle_leaves_x2(MetalCtxHandle ctx,
                                        uint32_t dim,
                                        uint32_t num_rows);
 
+// transpose_rowmajor: row-major [num_rows][ncols] → column-major
+// [ncols][num_rows]. Prep kernel for the coalesced-read leaf variant.
+// Uses 32x32 threadgroup tiles.
+void metal_dispatch_transpose_rowmajor(MetalCtxHandle ctx,
+                                        MetalBufHandle src_buf,
+                                        MetalBufHandle dst_buf,
+                                        uint32_t num_rows,
+                                        uint32_t ncols);
+
+// merkle_leaves_cm: coalesced-read variant. Reads column-major input so
+// adjacent threads in a simdgroup fetch adjacent memory addresses. Much
+// better bandwidth utilization than the row-major kernel when the input
+// is large enough for L1 cache to matter.
+void metal_dispatch_merkle_leaves_cm(MetalCtxHandle ctx,
+                                      MetalBufHandle inp_cm_buf,
+                                      MetalBufHandle tree_buf,
+                                      uint32_t ncols,
+                                      uint32_t dim,
+                                      uint32_t num_rows);
+
+// merkle_leaves_tg: fused-tile variant — each threadgroup cooperatively loads
+// a 32-row × 8-col tile into threadgroup memory (coalesced), then each
+// thread consumes its own row. No separate transpose buffer. Expected to
+// beat the plain row-major kernel when memory bandwidth matters.
+void metal_dispatch_merkle_leaves_tg(MetalCtxHandle ctx,
+                                      MetalBufHandle in_buf,
+                                      MetalBufHandle tree_buf,
+                                      uint32_t ncols,
+                                      uint32_t dim,
+                                      uint32_t num_rows);
+
 // merkle_parents: one thread per parent output node.
 //   buf       = full tree buffer  (buffer(0))
 //   nextIndex = flat element offset to start of children level  (buffer(1) constant)
