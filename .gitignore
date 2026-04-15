@@ -5,7 +5,19 @@ test
 bench
 testsgpu
 testscpu
+testcpu
 benchcpu
 benchgpu
 deviceQuery
+check_neon_mul
+check_neon_mul_bench
+check_simd_traits_compile
+
+# SME probe binaries (see benchs/sme_probes/)
+benchs/sme_probes/01_stream_nop
+benchs/sme_probes/02_zero_za
+benchs/sme_probes/03_i16_i64_matmul
 *.o
+
+# Editor / tooling artifacts
+.claude/
