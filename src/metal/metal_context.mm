@@ -368,6 +368,51 @@ void metal_dispatch_merkle_parents(MetalCtxHandle ctx,
     }
 }
 
+void metal_dispatch_merkle_parents_all_levels(MetalCtxHandle ctx,
+                                                MetalBufHandle buf,
+                                                uint32_t initial_pending) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        id<MTLComputePipelineState> pso =
+            (__bridge id<MTLComputePipelineState>)(
+                metal_context_pipeline(ctx, "merkle_parents"));
+
+        id<MTLCommandBuffer>        cmd = [impl->_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(buf) offset:0 atIndex:0];
+
+        uint32_t pending   = initial_pending;
+        uint32_t nextIndex = 0;
+        NSUInteger tpg = threadgroup_size_for(pso, 64);
+
+        // Iterate tree levels, encoding one dispatch per level into the same
+        // command buffer. Barrier between levels so each parent sees the
+        // previous level's writes.
+        while (pending > 1) {
+            uint32_t nextN = (pending - 1) / 2 + 1;  // == ceil(pending/2)
+
+            [enc setBytes:&nextIndex length:sizeof(uint32_t) atIndex:1];
+            [enc setBytes:&pending   length:sizeof(uint32_t) atIndex:2];
+
+            NSUInteger groups = ((NSUInteger)nextN + tpg - 1) / tpg;
+            [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+               threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+
+            nextIndex += pending * 4;  // HASH_SIZE = 4
+            pending   /= 2;
+
+            if (pending > 1) {
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            }
+        }
+
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ntt_reverse_permutation dispatch
 // ---------------------------------------------------------------------------

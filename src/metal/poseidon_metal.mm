@@ -113,25 +113,10 @@ void merkletree_metal(Goldilocks::Element* tree,
         //   nextN       = ceil(pending / 2) = number of parent nodes to write
         //   nextIndex   = flat element offset to START of children at this level
         // -------------------------------------------------------------------
-        uint64_t pending   = num_rows;
-        uint64_t nextIndex = 0;  // in units of Goldilocks::Element (uint64_t)
-
-        while (pending > 1) {
-            uint64_t nextN = (pending - 1) / 2 + 1;  // == ceil(pending/2)
-
-            uint32_t ni32      = (uint32_t)nextIndex;
-            uint32_t pending32 = (uint32_t)pending;
-            uint32_t nextN32   = (uint32_t)nextN;
-
-            metal_dispatch_merkle_parents(ctx,
-                                           tree_buf,
-                                           ni32,
-                                           pending32,
-                                           nextN32);
-
-            nextIndex += pending * HASH_SIZE_;
-            pending    = pending / 2;
-        }
+        // All tree levels in one command buffer (one waitUntilCompleted).
+        metal_dispatch_merkle_parents_all_levels(ctx,
+                                                  tree_buf,
+                                                  (uint32_t)num_rows);
 
         // -------------------------------------------------------------------
         // Readback if tree buffer was a copy (not a zero-copy alias).

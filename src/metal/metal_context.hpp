@@ -123,6 +123,13 @@ void metal_dispatch_merkle_parents(MetalCtxHandle ctx,
                                     uint32_t pending,
                                     uint32_t nextN);
 
+// Batched: encode all tree-level parent reductions into one command buffer
+// with memoryBarrierWithScope:MTLBarrierScopeBuffers between levels and one
+// waitUntilCompleted at the end. Kills log2(N) × ~1.5ms commit overhead.
+void metal_dispatch_merkle_parents_all_levels(MetalCtxHandle ctx,
+                                                MetalBufHandle buf,
+                                                uint32_t initial_pending);
+
 // ntt_reverse_permutation: one thread per row index in [0, domain_size).
 //   buf        = data buffer [domain_size * ncols]  (buffer(0))
 //   domainPow  = log2(domain_size)                  (buffer(1) constant)

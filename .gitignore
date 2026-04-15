@@ -28,6 +28,7 @@ benchs/metal_probes/probe_poseidon
 benchs/metal_probes/probe_merkle
 benchs/metal_probes/bench_merkle
 benchs/metal_probes/bench_ntt
+benchs/metal_probes/probe_kernel_gpu_time
 *.air
 # Generated from src/poseidon_goldilocks_constants.hpp at build time
 src/metal/kernels/constants.metal.inc
