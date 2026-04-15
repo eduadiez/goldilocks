@@ -164,6 +164,64 @@ kernel void ntt_rev_butterfly_s1(
     dst[(pair_idx * 2u + 1u) * ncols + col] = gl_sub(u, t);
 }
 
+// ---- kernel: intt_reorder_scale -------------------------------------------
+// Fused INTT finalization: combines the (N-i) % N reorder and the 1/N scale
+// into one in-place pass. Saves one full read+write pass over the buffer
+// and one command buffer commit+wait versus running intt_reorder followed
+// by intt_scale.
+//
+// Layout: each thread tid owns a "pair key" in [0, N/2]. The semantics:
+//   tid == 0            → position 0 is a fixed point (intt_idx(0,N)=0).
+//                         Just scale buf[0..ncols-1].
+//   tid in [1, N/2)     → pair (tid, N-tid). Swap + scale both positions.
+//   tid == N/2 (N even) → fixed point (N - N/2 = N/2). Just scale.
+//
+// Dispatch: (N/2 + 1) threads per column group.
+kernel void intt_reorder_scale(
+    device ulong*    buf           [[ buffer(0) ]],
+    constant uint&   domain_size   [[ buffer(1) ]],
+    constant uint&   ncols         [[ buffer(2) ]],
+    constant ulong&  inv_n         [[ buffer(3) ]],
+    uint tid [[ thread_position_in_grid ]]
+) {
+    uint N  = domain_size;
+    uint hi = N - tid;  // intt_idx(tid, N) when tid != 0
+
+    // Fixed points: tid == 0 (always), and tid == N/2 if N even.
+    if (tid == 0) {
+        for (uint c = 0; c < ncols; c++) {
+            uint idx = c;
+            buf[idx] = gl_canonicalize(gl_mul(buf[idx], inv_n));
+        }
+        return;
+    }
+    if (tid >= hi) {
+        // If tid == hi (i.e. tid == N/2 and N even), this is a fixed point;
+        // scale it. Otherwise we've gone past the pair boundary — no-op.
+        if (tid == hi) {
+            for (uint c = 0; c < ncols; c++) {
+                uint idx = tid * ncols + c;
+                buf[idx] = gl_canonicalize(gl_mul(buf[idx], inv_n));
+            }
+        }
+        return;
+    }
+
+    // Normal pair: swap (tid, N-tid) with scale fused in.
+    //   Before: at position lo=tid,   value V_lo
+    //           at position hi=N-tid, value V_hi
+    //   After reorder: lo gets V_hi, hi gets V_lo
+    //   After scale:   each multiplied by inv_n
+    for (uint c = 0; c < ncols; c++) {
+        uint lo_idx = tid * ncols + c;
+        uint hi_idx = hi  * ncols + c;
+        ulong a = buf[lo_idx];
+        ulong b = buf[hi_idx];
+        buf[lo_idx] = gl_canonicalize(gl_mul(b, inv_n));
+        buf[hi_idx] = gl_canonicalize(gl_mul(a, inv_n));
+    }
+}
+
 // ---- kernel: intt_reorder --------------------------------------------------
 // Inverse-NTT index permutation: out[(N - i) % N] = in[i].
 // CPU reference: NTT_iters uses intt_idx(i,N) = (N - i) % N before INTT scale

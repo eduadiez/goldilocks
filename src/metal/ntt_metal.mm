@@ -159,14 +159,14 @@ void NTT_Metal(Goldilocks::Element* dst,
         //    Actually powTwoInv is not exposed. Compute 1/N using Goldilocks::inv.
         // -------------------------------------------------------------------
         if (inverse) {
-            // INTT = forward-NTT butterflies + index permutation (N-i) % N + scale 1/N
-            // (see NTT_iters in ntt_goldilocks.cpp:175,188 and intt_idx at .hpp:38).
-            metal_dispatch_intt_reorder(ctx, dst_buf, domain32, ncols32);
-
+            // INTT = forward-NTT butterflies + index permutation (N-i) % N + scale 1/N.
+            // Fused reorder+scale kernel does both in one pass/commit vs the
+            // previous two-dispatch approach (see ntt_reorder_scale in
+            // ntt.metal).
             Goldilocks::Element inv_n = Goldilocks::inv(Goldilocks::fromU64(size));
             uint64_t inv_n_u64 = Goldilocks::toU64(inv_n);
-            uint32_t count     = (uint32_t)(size * ncols);
-            metal_dispatch_intt_scale(ctx, dst_buf, inv_n_u64, count);
+            metal_dispatch_intt_reorder_scale(ctx, dst_buf,
+                                                domain32, ncols32, inv_n_u64);
         }
 
         // -------------------------------------------------------------------
