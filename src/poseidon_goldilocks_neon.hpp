@@ -47,8 +47,13 @@ inline void PoseidonGoldilocks::add_neon(uint64x2_t st[6], const Goldilocks::Ele
 
 // NEON matrix-vector product: state = M^T * old_state (shape SPONGE_WIDTH x SPONGE_WIDTH).
 // Operates entirely in NEON registers; caller provides state both as input (old) and output.
+//
+// Phase 1l: uses mul_small_reduced for MDS matrix entries (Poseidon M matrix has
+// all entries ≤ 41). P matrix (used once per hash) has full 64-bit values and
+// still uses mul_reduced.
 inline void PoseidonGoldilocks::mvp_neon(Goldilocks::Element *state,
-    const Goldilocks::Element mat[SPONGE_WIDTH][SPONGE_WIDTH])
+    const Goldilocks::Element mat[SPONGE_WIDTH][SPONGE_WIDTH],
+    bool mat_is_small)
 {
     using N = goldilocks::simd::GLSimd<goldilocks::simd::Neon>;
     Goldilocks::Element old_state[SPONGE_WIDTH];
@@ -57,11 +62,24 @@ inline void PoseidonGoldilocks::mvp_neon(Goldilocks::Element *state,
     uint64x2_t out[6];
     for (int i = 0; i < 6; ++i) out[i] = N::splat(0);
 
-    for (int j = 0; j < SPONGE_WIDTH; ++j) {
-        uint64x2_t bc = N::splat(old_state[j].fe);
-        for (int i = 0; i < 6; ++i) {
-            uint64x2_t m_ji = N::load(&mat[j][i * 2]);
-            out[i] = N::add(out[i], N::mul_reduced(bc, m_ji));
+    if (mat_is_small) {
+        // Fast path: every mat[j][k] fits in 32 bits (Poseidon M).
+        for (int j = 0; j < SPONGE_WIDTH; ++j) {
+            uint64x2_t bc = N::splat(old_state[j].fe);
+            for (int i = 0; i < 6; ++i) {
+                uint64_t m0 = mat[j][i * 2].fe;
+                uint64_t m1 = mat[j][i * 2 + 1].fe;
+                out[i] = N::add(out[i], N::mul_small_reduced(bc, m0, m1));
+            }
+        }
+    } else {
+        // General path: mat entries can be full 64-bit (Poseidon P).
+        for (int j = 0; j < SPONGE_WIDTH; ++j) {
+            uint64x2_t bc = N::splat(old_state[j].fe);
+            for (int i = 0; i < 6; ++i) {
+                uint64x2_t m_ji = N::load(&mat[j][i * 2]);
+                out[i] = N::add(out[i], N::mul_reduced(bc, m_ji));
+            }
         }
     }
     for (int i = 0; i < 6; ++i) N::store(&state[i * 2], out[i]);
@@ -71,19 +89,33 @@ inline void PoseidonGoldilocks::mvp_neon(Goldilocks::Element *state,
 // Layout: st[k] = {stA[k], stB[k]} for k=0..11. Processes 2 independent
 // Poseidon hashes per NEON register; doubles throughput when merkle rows pair up.
 inline void PoseidonGoldilocks::mvp_neon_2(uint64x2_t st[12],
-    const Goldilocks::Element mat[SPONGE_WIDTH][SPONGE_WIDTH])
+    const Goldilocks::Element mat[SPONGE_WIDTH][SPONGE_WIDTH],
+    bool mat_is_small)
 {
     using N = goldilocks::simd::GLSimd<goldilocks::simd::Neon>;
     uint64x2_t old[12];
     for (int k = 0; k < 12; ++k) old[k] = st[k];
 
-    for (int k = 0; k < 12; ++k) {
-        uint64x2_t acc = N::splat(0);
-        for (int j = 0; j < 12; ++j) {
-            uint64x2_t m_jk = N::splat(mat[j][k].fe);
-            acc = N::add(acc, N::mul_reduced(m_jk, old[j]));
+    if (mat_is_small) {
+        // Fast path: MDS entries fit in 32 bits.
+        for (int k = 0; k < 12; ++k) {
+            uint64x2_t acc = N::splat(0);
+            for (int j = 0; j < 12; ++j) {
+                uint64_t m = mat[j][k].fe;
+                acc = N::add(acc, N::mul_small_reduced(old[j], m, m));
+            }
+            st[k] = acc;
         }
-        st[k] = acc;
+    } else {
+        // General path (used once per hash for P matrix).
+        for (int k = 0; k < 12; ++k) {
+            uint64x2_t acc = N::splat(0);
+            for (int j = 0; j < 12; ++j) {
+                uint64x2_t m_jk = N::splat(mat[j][k].fe);
+                acc = N::add(acc, N::mul_reduced(m_jk, old[j]));
+            }
+            st[k] = acc;
+        }
     }
 }
 

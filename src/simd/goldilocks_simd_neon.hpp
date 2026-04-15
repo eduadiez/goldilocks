@@ -247,6 +247,55 @@ template <> struct GLSimd<Neon> {
         return s3 + pos_cq - neg_cq;
     }
 
+    // Phase 1l: mul_small — Goldilocks multiplication when one operand is known
+    // to fit in [0, 2^32). Poseidon's MDS matrix entries are all ≤ 41, so this
+    // is heavily used inside mvp_neon/mvp_neon_2.
+    //
+    // Simplified reduction: c = a * small ≤ 2^64 * 2^32 = 2^96, so c_hi < 2^32.
+    // This means c_hi_hi (= c_hi >> 32) is always 0. The reduction collapses:
+    //   result = c_lo + c_hi * EPSILON (mod p) = c_lo + (c_hi << 32) - c_hi
+    // Only 1 carry-correction step needed (the second branch in the full mul is
+    // always no-op because c_hi < 2^32).
+    static inline __attribute__((always_inline)) Vec mul_small_reduced(Vec a, uint64_t small0, uint64_t small1) {
+        uint64_t a0 = vgetq_lane_u64(a, 0);
+        uint64_t a1 = vgetq_lane_u64(a, 1);
+        uint64_t r0, r1;
+        uint64_t lo0, hi0, lo1, hi1, shl0, shl1, adj0, adj1, tmp0, tmp1;
+
+        asm(
+            "mul   %[lo0], %[a0], %[s0]\n\t"
+            "mul   %[lo1], %[a1], %[s1]\n\t"
+            "umulh %[hi0], %[a0], %[s0]\n\t"
+            "umulh %[hi1], %[a1], %[s1]\n\t"
+            // hi_times_eps = (hi << 32) - hi  (since EPSILON = 2^32 - 1)
+            "lsl   %[shl0], %[hi0], #32\n\t"
+            "lsl   %[shl1], %[hi1], #32\n\t"
+            "sub   %[tmp0], %[shl0], %[hi0]\n\t"
+            "sub   %[tmp1], %[shl1], %[hi1]\n\t"
+            // result = lo + hi_times_eps  (may wrap)
+            "adds  %[r0], %[lo0], %[tmp0]\n\t"
+            "csetm %w[adj0], cs\n\t"
+            "adds  %[r1], %[lo1], %[tmp1]\n\t"
+            "csetm %w[adj1], cs\n\t"
+            "add   %[r0], %[r0], %[adj0]\n\t"
+            "add   %[r1], %[r1], %[adj1]\n\t"
+            : [r0]"=&r"(r0), [r1]"=&r"(r1),
+              [lo0]"=&r"(lo0), [lo1]"=&r"(lo1),
+              [hi0]"=&r"(hi0), [hi1]"=&r"(hi1),
+              [shl0]"=&r"(shl0), [shl1]"=&r"(shl1),
+              [tmp0]"=&r"(tmp0), [tmp1]"=&r"(tmp1),
+              [adj0]"=&r"(adj0), [adj1]"=&r"(adj1)
+            : [a0]"r"(a0), [a1]"r"(a1),
+              [s0]"r"(small0), [s1]"r"(small1)
+            : "cc"
+        );
+        (void)lo0; (void)hi0; (void)lo1; (void)hi1;
+        (void)shl0; (void)shl1; (void)tmp0; (void)tmp1;
+        (void)adj0; (void)adj1;
+        uint64_t tmp[2] = {r0, r1};
+        return vld1q_u64(tmp);
+    }
+
     // Public canonical mul — preserves the [0, P) output contract.
     static inline __attribute__((always_inline)) Vec mul(Vec a, Vec b) {
         uint64x2_t r = mul_reduced(a, b);

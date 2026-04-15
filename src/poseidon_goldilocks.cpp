@@ -374,7 +374,7 @@ void PoseidonGoldilocks::hash_full_result_neon(Goldilocks::Element *state, const
         add_neon(st, &(PoseidonGoldilocksConstants::C[(r + 1) * SPONGE_WIDTH]));
         // Matrix mul (scalar): store, mvp_, reload
         for (int i = 0; i < 6; ++i) N::store(&state[i * 2], st[i]);
-        mvp_neon(state, PoseidonGoldilocksConstants::M);
+        mvp_neon(state, PoseidonGoldilocksConstants::M, /*mat_is_small=*/true);
         for (int i = 0; i < 6; ++i) st[i] = N::load(&state[i * 2]);
     }
 
@@ -401,7 +401,7 @@ void PoseidonGoldilocks::hash_full_result_neon(Goldilocks::Element *state, const
         pow7_neon(st);
         add_neon(st, &(PoseidonGoldilocksConstants::C[(HALF_N_FULL_ROUNDS + 1) * SPONGE_WIDTH + N_PARTIAL_ROUNDS + r * SPONGE_WIDTH]));
         for (int i = 0; i < 6; ++i) N::store(&state[i * 2], st[i]);
-        mvp_neon(state, PoseidonGoldilocksConstants::M);
+        mvp_neon(state, PoseidonGoldilocksConstants::M, /*mat_is_small=*/true);
         for (int i = 0; i < 6; ++i) st[i] = N::load(&state[i * 2]);
     }
 
@@ -410,7 +410,7 @@ void PoseidonGoldilocks::hash_full_result_neon(Goldilocks::Element *state, const
     // at the state boundary).
     pow7_neon(st);
     for (int i = 0; i < 6; ++i) N::store(&state[i * 2], st[i]);
-    mvp_neon(state, PoseidonGoldilocksConstants::M);
+    mvp_neon(state, PoseidonGoldilocksConstants::M, /*mat_is_small=*/true);
     for (int i = 0; i < 6; ++i) {
         N::store(&state[i * 2], N::canonicalize(N::load(&state[i * 2])));
     }
@@ -462,7 +462,7 @@ void PoseidonGoldilocks::hash_full_result_neon_2(
     for (int r = 0; r < HALF_N_FULL_ROUNDS - 1; ++r) {
         pow7_pair();
         add_pair(&PoseidonGoldilocksConstants::C[(r + 1) * SPONGE_WIDTH]);
-        mvp_neon_2(st, PoseidonGoldilocksConstants::M);
+        mvp_neon_2(st, PoseidonGoldilocksConstants::M, /*mat_is_small=*/true);
     }
 
     // Transition round
@@ -502,12 +502,12 @@ void PoseidonGoldilocks::hash_full_result_neon_2(
     for (int r = 0; r < HALF_N_FULL_ROUNDS - 1; ++r) {
         pow7_pair();
         add_pair(&PoseidonGoldilocksConstants::C[(HALF_N_FULL_ROUNDS + 1) * SPONGE_WIDTH + N_PARTIAL_ROUNDS + r * SPONGE_WIDTH]);
-        mvp_neon_2(st, PoseidonGoldilocksConstants::M);
+        mvp_neon_2(st, PoseidonGoldilocksConstants::M, /*mat_is_small=*/true);
     }
 
     // Final pow7 + mvp
     pow7_pair();
-    mvp_neon_2(st, PoseidonGoldilocksConstants::M);
+    mvp_neon_2(st, PoseidonGoldilocksConstants::M, /*mat_is_small=*/true);
 
     // Canonicalize at store (Phase 1h: muls inside the hash are non-canonical).
     Goldilocks::Element lanes[2];
