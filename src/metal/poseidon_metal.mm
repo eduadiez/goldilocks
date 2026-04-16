@@ -29,7 +29,13 @@
 #include <vector>
 
 #include <thread>
+#include <atomic>
+#include <mutex>
+#include <chrono>
+#include <vector>
 #include <omp.h>
+
+#include "../merklehash_goldilocks.hpp"
 
 #include "../goldilocks_base_field.hpp"
 #include "../poseidon_goldilocks.hpp"
@@ -350,6 +356,11 @@ void merkletree_hybrid(Goldilocks::Element* tree,
                        double cpu_fraction)
 {
     if (nrows == 0) return;
+    // Negative sentinel → use the auto-calibrated CPU/GPU ratio.
+    if (cpu_fraction < 0.0) {
+        double R = get_merkle_throughput_ratio();
+        cpu_fraction = 1.0 / (1.0 + R);
+    }
     if (cpu_fraction < 0.0) cpu_fraction = 0.0;
     if (cpu_fraction > 1.0) cpu_fraction = 1.0;
 
@@ -409,6 +420,139 @@ void merkletree_hybrid(Goldilocks::Element* tree,
 
     // All leaves now materialized across tree[0 .. nrows*HASH_SIZE_).
     merkletree_metal_parents_only(tree, nrows);
+}
+
+// ---------------------------------------------------------------------------
+// get_merkle_throughput_ratio — one-time hardware calibration of T_neon /
+// T_metal for a representative Merkle workload. Used by the hybrid
+// dispatchers below to pick the CPU/GPU split that balances finishing
+// times: cpu_fraction = 1 / (1 + R).
+//
+// Calibration shape: 128 cols × 16384 rows. Big enough to escape the
+// per-call launch overhead, small enough that the calibration costs ~30 ms
+// total. The ratio is broadly stable across larger shapes because both
+// engines scale ~linearly with rows × cols above the launch-bound regime.
+//
+// Thread-safe via call_once. Subsequent calls are atomic loads.
+// ---------------------------------------------------------------------------
+double get_merkle_throughput_ratio() {
+    static std::atomic<bool> initialized{false};
+    static std::once_flag    flag;
+    static double            ratio = 2.5;  // safe default if calibration fails
+
+    std::call_once(flag, []{
+        const uint64_t ncols = 128;
+        const uint64_t nrows = 16384;
+        uint64_t n_elem = ncols * nrows;
+        uint64_t n_tree = MerklehashGoldilocks::getTreeNumElements(nrows);
+
+        std::vector<Goldilocks::Element> input(n_elem);
+        std::vector<Goldilocks::Element> tree_metal(n_tree);
+        std::vector<Goldilocks::Element> tree_neon (n_tree);
+
+        for (uint64_t i = 0; i < n_elem; i++)
+            input[i] = Goldilocks::fromU64(i + 1);
+
+        // Warm up both engines (Metal: pipeline compile + first dispatch;
+        // NEON: OMP thread pool spin-up).
+        PoseidonGoldilocks::merkletree_metal(tree_metal.data(), input.data(),
+                                              ncols, nrows);
+        PoseidonGoldilocks::merkletree_neon (tree_neon.data(),  input.data(),
+                                              ncols, nrows);
+
+        using Clock = std::chrono::steady_clock;
+        auto t0 = Clock::now();
+        PoseidonGoldilocks::merkletree_metal(tree_metal.data(), input.data(),
+                                              ncols, nrows);
+        auto t1 = Clock::now();
+        PoseidonGoldilocks::merkletree_neon (tree_neon.data(),  input.data(),
+                                              ncols, nrows);
+        auto t2 = Clock::now();
+
+        double t_metal = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        double t_neon  = std::chrono::duration<double, std::milli>(t2 - t1).count();
+        if (t_metal > 0.001 && t_neon > 0.001) {
+            ratio = t_neon / t_metal;
+        }
+        initialized.store(true, std::memory_order_release);
+    });
+    return ratio;
+}
+
+// ---------------------------------------------------------------------------
+// merkletree_hybrid_batch — tree-count split. Splits `count` trees between
+// engines: `n_cpu` go to NEON (OMP-parallel), `n_gpu = count - n_cpu` go
+// to the Metal batched dispatcher. Both halves run concurrently.
+//
+// Why this scales where merkletree_hybrid hits a wall at 8M rows:
+//   merkletree_hybrid splits a SINGLE tree by row, so CPU and GPU touch
+//   adjacent regions of the same buffer — at multi-GB sizes they collide
+//   in the unified-memory controller. merkletree_hybrid_batch puts WHOLE
+//   trees on each engine, so the per-engine memory traffic is
+//   independent — the contention probe's 0.99 overlap efficiency holds at
+//   any tree size.
+//
+// All trees share the same (ncols, nrows). cpu_fraction < 0 → auto.
+// ---------------------------------------------------------------------------
+void merkletree_hybrid_batch(Goldilocks::Element** trees,
+                             Goldilocks::Element** inputs,
+                             uint64_t count,
+                             uint64_t ncols,
+                             uint64_t nrows,
+                             double cpu_fraction)
+{
+    if (count == 0 || nrows == 0) return;
+
+    if (cpu_fraction < 0.0) {
+        double R = get_merkle_throughput_ratio();
+        cpu_fraction = 1.0 / (1.0 + R);
+    }
+    if (cpu_fraction < 0.0) cpu_fraction = 0.0;
+    if (cpu_fraction > 1.0) cpu_fraction = 1.0;
+
+    // FLOOR (not round) so we never overload the CPU side. Reasoning:
+    // CPU is the slower per-tree engine on every measured shape, so
+    // assigning n_cpu = round(count * cpu_fraction) can flip the
+    // bottleneck from GPU to CPU at small `count`. floor keeps n_cpu
+    // strictly ≤ the balance point. Example: count=2, cpu_fraction≈0.3
+    // → round=1 (CPU 1 tree, GPU 1 tree, CPU is the slower one and
+    // stalls the whole call); floor=0 (everything on GPU, faster).
+    uint64_t n_cpu = (uint64_t)((double)count * cpu_fraction);
+    if (n_cpu > count) n_cpu = count;
+    uint64_t n_gpu = count - n_cpu;
+
+    // Degenerate splits → fall back to single-engine batch / sequential.
+    if (n_cpu == 0) {
+        merkletree_metal_batch(trees, inputs, count, ncols, nrows);
+        return;
+    }
+    if (n_gpu == 0) {
+        // All on CPU. Use OMP across trees.
+        #pragma omp parallel for schedule(static)
+        for (uint64_t i = 0; i < count; i++) {
+            PoseidonGoldilocks::merkletree_neon(trees[i], inputs[i], ncols, nrows);
+        }
+        return;
+    }
+
+    // GPU thread: dispatch the first n_gpu trees as a single batched
+    // command buffer.
+    std::thread gpu_thread([&]{
+        merkletree_metal_batch(trees, inputs, n_gpu, ncols, nrows);
+    });
+
+    // CPU side: build the remaining n_cpu trees SEQUENTIALLY. Each
+    // merkletree_neon call uses OMP internally across all P-cores, so an
+    // outer parallel region here would force OMP nesting — which is
+    // disabled by default → each merkletree_neon call would collapse to
+    // single-threaded execution and run ~14× slower. Verified on M4 Pro:
+    // an outer `#pragma omp parallel for` here made the CPU side 9-10×
+    // slower than serial sequential calls.
+    for (uint64_t i = n_gpu; i < count; i++) {
+        PoseidonGoldilocks::merkletree_neon(trees[i], inputs[i], ncols, nrows);
+    }
+
+    gpu_thread.join();
 }
 
 Goldilocks::Element* allocate_aligned_elements(uint64_t n) {

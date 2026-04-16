@@ -112,13 +112,26 @@ public:
     // Hybrid CPU NEON + GPU Metal Merkle build. Splits leaf-hashing by
     // row between engines (NEON on rows [0, K), Metal on rows [K, N))
     // then finishes with the parent reduction on Metal. `cpu_fraction`
-    // controls K — default 0.30 reflects the measured Metal ≈ 2.3× NEON
-    // ratio on Merkle at production scale. See src/metal/poseidon_metal.mm
-    // and benchs/metal_probes/bench_hybrid_merkle.mm.
+    // controls K; pass a negative value (the default) to auto-pick from
+    // the one-time hardware-calibrated CPU/GPU throughput ratio. Best
+    // for nrows ≤ 1M; merkletree_metal wins above that scale.
     static void merkletree_hybrid(Goldilocks::Element *tree,
                                   Goldilocks::Element *input,
                                   uint64_t num_cols, uint64_t num_rows,
-                                  double cpu_fraction = 0.30);
+                                  double cpu_fraction = -1.0);
+
+    // Hybrid CPU NEON + GPU Metal BATCHED Merkle build. Splits trees
+    // (not within a tree) between engines: n_gpu trees on the GPU
+    // (batched dispatch), n_cpu trees on the CPU (NEON, OMP-parallel),
+    // concurrent. Each engine touches independent buffers, so this works
+    // at any tree size — including the MERKLETREE_BENCH 8M shape where
+    // merkletree_hybrid (within-tree split) breaks down.
+    // cpu_fraction is the FRACTION OF TREES on the CPU; pass < 0 for auto.
+    static void merkletree_hybrid_batch(Goldilocks::Element **trees,
+                                        Goldilocks::Element **inputs,
+                                        uint64_t count,
+                                        uint64_t num_cols, uint64_t num_rows,
+                                        double cpu_fraction = -1.0);
 #endif
 };
 
