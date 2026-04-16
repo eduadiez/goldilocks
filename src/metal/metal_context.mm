@@ -17,6 +17,7 @@
 #include <cstdio>
 
 #include "metal_context.hpp"
+#include "goldilocks_metal.hpp"  // for get_ntt_radix_thresholds()
 
 // ---------------------------------------------------------------------------
 // Internal Obj-C class holding all Metal state
@@ -29,6 +30,13 @@
     std::unordered_map<std::string, id<MTLComputePipelineState>> _pipelineCache;
     // key = roots_len (number of uint64_t elements)
     std::unordered_map<uint64_t, id<MTLBuffer>> _twiddleCache;
+    // Two reusable scratch slots, lazily allocated and grown on demand.
+    // Slot 0 = "small" (sized for in-place INTT scratch ≈ N×ncols)
+    // Slot 1 = "large" (sized for fused forward NTT scratch ≈ N_Ext×ncols
+    //                   inside extendPol_Metal — typically 2× slot 0)
+    // Owned by the context; callers do NOT release the returned handle.
+    id<MTLBuffer> _scratch[2];
+    size_t        _scratchBytes[2];
     std::mutex _mutex;
 }
 @end
@@ -50,6 +58,8 @@
             abort();
         }
         _library = nil;
+        _scratch[0] = nil;     _scratchBytes[0] = 0;
+        _scratch[1] = nil;     _scratchBytes[1] = 0;
     }
     return self;
 }
@@ -228,6 +238,55 @@ void metal_buf_release(MetalBufHandle buf) {
     // Release the +1 retain count taken by __bridge_retained in metal_buf_alias/alloc.
     id<MTLBuffer> b = (__bridge_transfer id<MTLBuffer>)(buf);
     (void)b;  // ARC releases when b goes out of scope.
+}
+
+// ---------------------------------------------------------------------------
+// Reusable scratch slots — owned by the context, lazily grown.
+// ---------------------------------------------------------------------------
+// Two slots are exposed (0 and 1) so that callers needing two concurrent
+// scratches don't have to manage allocation themselves. Typical usage:
+//   slot 0  = INTT scratch (size N×ncols)
+//   slot 1  = forward NTT scratch (size N_Extended×ncols, in extendPol_Metal)
+//
+// The returned MetalBufHandle is BORROWED — the context retains the
+// underlying MTLBuffer, callers MUST NOT call metal_buf_release on it.
+// The handle remains valid until the next call to
+// metal_context_scratch_borrow on the same slot with a larger byte size
+// (which frees the old buffer to allocate the new one). Within a single
+// extendPol_Metal / NTT_Metal call this is fine because the dispatch
+// functions are synchronous.
+//
+// Thread-safety: protected by the same _mutex as the twiddle cache. Two
+// threads racing on the same slot will get the larger buffer; both
+// returned handles will be valid (the buffer can hold both requests).
+extern "C" MetalBufHandle metal_context_scratch_borrow(MetalCtxHandle ctx,
+                                                        int slot,
+                                                        size_t bytes) {
+    if (slot < 0 || slot > 1) abort();
+    if (bytes == 0) bytes = 1;
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        std::lock_guard<std::mutex> lock(impl->_mutex);
+
+        if (impl->_scratch[slot] == nil || impl->_scratchBytes[slot] < bytes) {
+            // Round up to a power of two to amortize re-allocations: a
+            // slightly bigger workload won't trigger another alloc unless
+            // it exceeds the next power of two.
+            size_t alloc_bytes = 1;
+            while (alloc_bytes < bytes) alloc_bytes <<= 1;
+            id<MTLBuffer> buf =
+                [impl->_device newBufferWithLength:alloc_bytes
+                                           options:MTLResourceStorageModeShared];
+            if (buf == nil) {
+                NSLog(@"metal_context_scratch_borrow: alloc failed for %zu bytes",
+                      alloc_bytes);
+                abort();
+            }
+            impl->_scratch[slot] = buf;
+            impl->_scratchBytes[slot] = alloc_bytes;
+        }
+        return (__bridge void*)(impl->_scratch[slot]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -818,19 +877,13 @@ void metal_dispatch_ntt_butterfly_all_phases(MetalCtxHandle ctx,
 
         // Radix-k wins when the per-thread work is amortized across enough
         // parallel dispatches to saturate the GPU. The crossover thresholds
-        // below are empirical on Apple M4 Pro: below R4_MIN_THREADS the
-        // per-thread register footprint of r4 kills occupancy; below
-        // R8_MIN_THREADS the same applies to r8 (even more registers per
-        // thread). Above the thresholds, fewer passes + more ILP wins.
-        const uint32_t R4_MIN_THREADS = 8192;
-        // R8 per-thread register pressure is ~2× r4 (8 elements live + 7
-        // twiddles + intermediates). At small total-thread counts the GPU
-        // can't hide the occupancy drop even when data exceeds L1/L2; the
-        // crossover on M4 Pro sits near 128k threads (seen as a regression
-        // at N=2^18, ncols=1 just above the previous 32k threshold).
-        const uint32_t R8_MIN_THREADS = 131072;
-        bool use_radix4 = (quarter * ncols >= R4_MIN_THREADS);
-        bool use_radix8 = (eighth  * ncols >= R8_MIN_THREADS);
+        // are tuned manually on M4 Pro (8192 / 131072) but accept env var
+        // and disk-cache overrides via goldilocks_metal::get_ntt_radix_thresholds()
+        // so callers on different Apple Silicon variants (more / fewer GPU
+        // cores) can plug in their own numbers without recompiling.
+        auto thr = goldilocks_metal::get_ntt_radix_thresholds();
+        bool use_radix4 = (quarter * ncols >= thr.r4_min);
+        bool use_radix8 = (eighth  * ncols >= thr.r8_min);
 
         uint32_t s = start_s;
         bool first = true;

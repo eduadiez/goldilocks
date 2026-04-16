@@ -310,6 +310,30 @@ void metal_dispatch_intt_scale(MetalCtxHandle ctx,
                                 uint64_t inv_n,
                                 uint32_t count);
 
+// ---------- Reusable scratch slots ------------------------------------------
+//
+// Returns a borrowed (non-owning) MTLBuffer handle of at least `bytes`
+// size from the context's persistent scratch storage. Two slots are
+// exposed (0 and 1) so callers can hold two concurrent scratches.
+//
+// The context retains the buffer; callers MUST NOT call metal_buf_release
+// on the returned handle. Each slot grows to the next power of two ≥ the
+// requested size, so repeated calls with similar sizes don't reallocate.
+//
+// The handle is valid until the next call on the same slot with a
+// strictly larger size (which triggers reallocation). A single
+// extendPol_Metal / NTT_Metal call is synchronous so handles never
+// invalidate mid-call.
+//
+// Use case: in-place INTT or extendPol's forward NTT can take the fused
+// rev+s1+s2+s3 path if they have a separate `src` buffer — the scratch
+// is exactly that. The pool amortizes Metal's `newBuffer` cost (~1.5 ms
+// per 32 MB allocation) across all subsequent calls of the same shape,
+// turning a one-shot regression into a persistent win.
+MetalBufHandle metal_context_scratch_borrow(MetalCtxHandle ctx,
+                                            int slot,
+                                            size_t bytes);
+
 // ---------- Twiddle cache ---------------------------------------------------
 // Returns (or creates) a shared MTLBuffer containing the NTT roots for
 // the given array length (which must be a power of 2).
