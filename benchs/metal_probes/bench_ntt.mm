@@ -112,6 +112,30 @@ static void bench_one(uint64_t N, uint64_t ncols, int iters) {
     bool fwd_match = (std::memcmp(dst_cpu.data(), dst_gpu.data(),
                                   total * sizeof(Goldilocks::Element)) == 0);
 
+    // INTT timings (separate from forward). We time cpu INTT and gpu INTT on
+    // the freshly-computed forward outputs. GPU INTT is in-place on a
+    // working copy so repeated iterations see the same starting state.
+    std::vector<Goldilocks::Element> intt_cpu_in = dst_cpu;
+    std::vector<Goldilocks::Element> intt_cpu_out(total);
+    double t_cpu_intt = time_avg([&]{
+        ntt.INTT(intt_cpu_out.data(), intt_cpu_in.data(), N, ncols);
+    }, iters);
+
+    // Time INTT two ways: in-place (dst == src — caller-friendly, single-buffer)
+    // and out-of-place (dst != src — enables the fused rev+s1+s2+s3 path that
+    // saves a reverse_permutation pass). Both are content-independent, so we
+    // don't restore the input between iterations.
+    std::vector<Goldilocks::Element> intt_gpu_buf = dst_gpu;
+    double t_gpu_intt_ip = time_avg([&]{
+        ntt.NTT_Metal(intt_gpu_buf.data(), intt_gpu_buf.data(), N, ncols, /*inverse=*/true);
+    }, iters);
+
+    std::vector<Goldilocks::Element> intt_gpu_src = dst_gpu;
+    std::vector<Goldilocks::Element> intt_gpu_dst(total);
+    double t_gpu_intt_oop = time_avg([&]{
+        ntt.NTT_Metal(intt_gpu_dst.data(), intt_gpu_src.data(), N, ncols, /*inverse=*/true);
+    }, iters);
+
     // Round-trip correctness (separate from timing)
     std::vector<Goldilocks::Element> rt_cpu(total), rt_gpu(total);
     ntt.INTT(rt_cpu.data(), dst_cpu.data(), N, ncols);
@@ -128,9 +152,15 @@ static void bench_one(uint64_t N, uint64_t ncols, int iters) {
            (unsigned long long)N,
            (unsigned long long)ncols,
            iters);
-    printf("  cpu (NEON fast path): %10.3f ms\n", t_cpu);
-    printf("  metal               : %10.3f ms   (%5.2fx vs cpu)\n",
+    printf("  cpu NTT             : %10.3f ms\n", t_cpu);
+    printf("  metal NTT           : %10.3f ms   (%5.2fx vs cpu)\n",
            t_gpu, t_cpu / t_gpu);
+    printf("  cpu INTT            : %10.3f ms\n", t_cpu_intt);
+    printf("  metal INTT (in-pl)  : %10.3f ms   (%5.2fx vs cpu)\n",
+           t_gpu_intt_ip,  t_cpu_intt / t_gpu_intt_ip);
+    printf("  metal INTT (out-pl) : %10.3f ms   (%5.2fx vs cpu, %5.2fx vs in-pl)\n",
+           t_gpu_intt_oop, t_cpu_intt / t_gpu_intt_oop,
+           t_gpu_intt_ip / t_gpu_intt_oop);
     printf("  forward output bit-exact vs CPU : %s\n", fwd_match ? "match" : "DIVERGE");
     printf("  INTT(NTT(x)) == x  (cpu / gpu)  : %s / %s\n",
            rt_cpu_ok ? "ok" : "FAIL",

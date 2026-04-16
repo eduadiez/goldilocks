@@ -245,29 +245,42 @@ inline void linear_hash_tg(thread ulong out[4],
         return;
     }
     ulong state[12];
-    uint remaining = size;
-    bool first = true;
+    {
+        uint n = (size < 8) ? size : 8;
+        for (uint i = 0; i < n; i++) state[i] = inp[i];
+        for (uint i = n; i < 8; i++) state[i] = 0UL;
+        for (int i = 8; i < 12; i++) state[i] = 0UL;
+        pod12_tg(state, tgC, tgM, tgP, tgS);
+    }
+    uint offset    = (size < 8) ? size : 8;
+    uint remaining = size - offset;
     while (remaining > 0) {
-        if (first) { for (int i = 8; i < 12; i++) state[i] = 0UL; first = false; }
-        else       { for (int i = 0; i < 4; i++)  state[8 + i] = out[i]; }
         uint n = (remaining < 8) ? remaining : 8;
-        uint offset = size - remaining;
+        state[8]  = state[0];
+        state[9]  = state[1];
+        state[10] = state[2];
+        state[11] = state[3];
         for (uint i = 0; i < n; i++) state[i] = inp[offset + i];
         for (uint i = n; i < 8; i++) state[i] = 0UL;
-        ulong tmp[12];
-        for (int i = 0; i < 12; i++) tmp[i] = state[i];
-        pod12_tg(tmp, tgC, tgM, tgP, tgS);
-        for (int i = 0; i < 12; i++) tmp[i] = gl_canonicalize(tmp[i]);
-        for (int i = 0; i < 4; i++) out[i] = tmp[i];
-        for (int i = 0; i < 4; i++) state[i] = out[i];
+        pod12_tg(state, tgC, tgM, tgP, tgS);
         remaining -= n;
+        offset    += n;
     }
+    for (int i = 0; i < 4; i++) out[i] = gl_canonicalize(state[i]);
 }
 
 // ---- linear_hash: sponge absorb over device buffer -------------------------
 // Mirrors linear_hash_seq (poseidon_goldilocks.cpp:38-73).
 // size == number of ulong elements.
 // output must have space for 4 elements (CAPACITY = HASH_SIZE = 4).
+//
+// Register-budget note: Poseidon's hot path is mvp_M, which requires a local
+// ulong old[12] snapshot (inputs snapshot for the MDS). Any thread-array
+// concurrently live across pod12 adds ~12 more ulongs of pressure; at
+// max_total_threads_per_threadgroup(64) that dropped occupancy to ~42%.
+// We therefore run pod12 IN-PLACE on `state[]` (no `tmp[]` copy) and
+// pass the capacity rotation through state[8..11] directly — so only one
+// 12-element thread array is live around the permutation.
 inline void linear_hash(thread ulong out[4],
                         const device ulong* inp,
                         uint size) {
@@ -278,40 +291,38 @@ inline void linear_hash(thread ulong out[4],
     }
 
     ulong state[12];
-    uint remaining = size;
-    bool first = true;
+
+    // First absorb: capacity starts at zero.
+    {
+        uint n = (size < 8) ? size : 8;
+        for (uint i = 0; i < n; i++) state[i] = inp[i];
+        for (uint i = n; i < 8; i++) state[i] = 0UL;
+        #pragma unroll
+        for (int i = 8; i < 12; i++) state[i] = 0UL;
+        pod12(state);
+    }
+
+    uint offset    = (size < 8) ? size : 8;
+    uint remaining = size - offset;
 
     while (remaining > 0) {
-        // Set capacity portion of state
-        if (first) {
-            for (int i = 8; i < 12; i++) state[i] = 0UL;
-            first = false;
-        } else {
-            // copy previous capacity (state[0..3]) into state[8..11]
-            for (int i = 0; i < 4; i++) state[8 + i] = out[i];
-        }
-
         uint n = (remaining < 8) ? remaining : 8;
-        uint offset = size - remaining;
+        // Rotate previous output into capacity: state[8..11] = prev state[0..3].
+        state[8]  = state[0];
+        state[9]  = state[1];
+        state[10] = state[2];
+        state[11] = state[3];
+        // Refill rate from new input chunk.
         for (uint i = 0; i < n; i++) state[i] = inp[offset + i];
         for (uint i = n; i < 8; i++) state[i] = 0UL;
-
-        // Run permutation
-        ulong tmp[12];
-        for (int i = 0; i < 12; i++) tmp[i] = state[i];
-        pod12(tmp);
-        // NO canonicalize here — pod12 is mod-p correct on unreduced inputs
-        // up to [0, 2^64), so the sponge can carry lazy state across absorbs.
-        // Save output (capacity = first 4 for next round)
-        for (int i = 0; i < 4; i++) out[i] = tmp[i];
-        for (int i = 0; i < 4; i++) state[i] = out[i];
-
+        pod12(state);
         remaining -= n;
+        offset    += n;
     }
-    // Canonicalize only the final 4-element hash that the caller will write
-    // to device memory. Skips 12 × gl_canonicalize per absorb iteration
-    // (36 ops × 16 absorbs = 576 ops saved per row for ncols=128).
-    for (int i = 0; i < 4; i++) out[i] = gl_canonicalize(out[i]);
+    // Extract the capacity-output (state[0..3]) and canonicalize only the
+    // final 4-element hash that the caller will write to device memory.
+    // Skips 12 × gl_canonicalize per absorb iteration.
+    for (int i = 0; i < 4; i++) out[i] = gl_canonicalize(state[i]);
 }
 
 // ---- pod12_x2: 2-row-parallel Poseidon permutation -------------------------

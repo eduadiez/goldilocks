@@ -222,6 +222,22 @@ void metal_dispatch_ntt_rev_butterfly_s1s2(MetalCtxHandle ctx,
                                              uint32_t ncols,
                                              uint64_t I_val);
 
+// ntt_rev_butterfly_s1s2s3: fuses rev-perm + s=1 + s=2 + s=3 butterflies
+// into ONE pass. Saves THREE full read+write passes vs the unfused
+// sequence. Requires src ≠ dst and domain_pow ≥ 3.
+//   I_val  = ω_4   = roots[1 << (s_global - 2)]
+//   W8_val = ω_8   = roots[1 << (s_global - 3)]
+//   W8c_val = ω_8^3 = Goldilocks::mul(W8, Goldilocks::mul(W8, W8))
+// Dispatch: (domain_size/8 * ncols) threads.
+void metal_dispatch_ntt_rev_butterfly_s1s2s3(MetalCtxHandle ctx,
+                                              MetalBufHandle src,
+                                              MetalBufHandle dst,
+                                              uint32_t domain_pow,
+                                              uint32_t ncols,
+                                              uint64_t I_val,
+                                              uint64_t W8_val,
+                                              uint64_t W8c_val);
+
 // ntt_butterfly_phase: one thread per (butterfly pair, col) = domain_size/2 * ncols.
 //   buf                 = data buffer [domain_size * ncols]  (buffer(0))
 //   twiddles            = full roots array [1 << s_global]    (buffer(1))

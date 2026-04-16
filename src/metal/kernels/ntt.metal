@@ -222,6 +222,97 @@ kernel void ntt_rev_butterfly_s1s2(
     dst[(base_nat + 3u) * ncols + col] = gl_sub(y1, yI);
 }
 
+// ---- kernel: ntt_rev_butterfly_s1s2s3 -------------------------------------
+// Fuses (reverse permutation ∘ s=1 ∘ s=2 ∘ s=3) into ONE pass. Extension of
+// ntt_rev_butterfly_s1s2 to 8-wide. Saves one additional full read+write
+// pass versus s1s2 + the s=3 phase being handled by ntt_radix8_phase.
+//
+// Twiddles at the first three stages are all tiny fixed roots — no table
+// lookup needed:
+//   s=1: ω_2^0 = 1     (no mul)
+//   s=2: ω_4^0 = 1,  ω_4^1 = I
+//   s=3: ω_8^0 = 1,  ω_8^1 = W8,  ω_8^2 = I,  ω_8^3 = W8_cubed
+//
+// Requires src ≠ dst and domain_pow ≥ 3. Caller falls back to s1s2 for
+// domain_pow == 2 and to s=1-only fused for domain_pow == 1.
+//
+// Dispatch: (domain_size / 8) × ncols threads.
+kernel void ntt_rev_butterfly_s1s2s3(
+    device const ulong* src          [[ buffer(0) ]],
+    device       ulong* dst          [[ buffer(1) ]],
+    constant     uint&  domain_pow   [[ buffer(2) ]],
+    constant     uint&  ncols        [[ buffer(3) ]],
+    constant     ulong& I_val        [[ buffer(4) ]],  // ω_4
+    constant     ulong& W8_val       [[ buffer(5) ]],  // ω_8
+    constant     ulong& W8c_val      [[ buffer(6) ]],  // ω_8^3
+    uint tid [[ thread_position_in_grid ]]
+) {
+    uint eighth = (1u << domain_pow) >> 3u;
+    uint total  = eighth * ncols;
+    if (tid >= total) return;
+
+    uint group_idx = tid / ncols;
+    uint col       = tid % ncols;
+
+    uint shift = 32u - domain_pow;
+    uint base_nat = group_idx * 8u;
+
+    uint ra = reverse_bits32(base_nat + 0u) >> shift;
+    uint rb = reverse_bits32(base_nat + 1u) >> shift;
+    uint rc = reverse_bits32(base_nat + 2u) >> shift;
+    uint rd = reverse_bits32(base_nat + 3u) >> shift;
+    uint re = reverse_bits32(base_nat + 4u) >> shift;
+    uint rf = reverse_bits32(base_nat + 5u) >> shift;
+    uint rg = reverse_bits32(base_nat + 6u) >> shift;
+    uint rh = reverse_bits32(base_nat + 7u) >> shift;
+
+    ulong x_a = src[ra * ncols + col];
+    ulong x_b = src[rb * ncols + col];
+    ulong x_c = src[rc * ncols + col];
+    ulong x_d = src[rd * ncols + col];
+    ulong x_e = src[re * ncols + col];
+    ulong x_f = src[rf * ncols + col];
+    ulong x_g = src[rg * ncols + col];
+    ulong x_h = src[rh * ncols + col];
+
+    // Stage s=1: 4 pair butterflies, twiddle = 1
+    ulong y0 = gl_add(x_a, x_b);
+    ulong y1 = gl_sub(x_a, x_b);
+    ulong y2 = gl_add(x_c, x_d);
+    ulong y3 = gl_sub(x_c, x_d);
+    ulong y4 = gl_add(x_e, x_f);
+    ulong y5 = gl_sub(x_e, x_f);
+    ulong y6 = gl_add(x_g, x_h);
+    ulong y7 = gl_sub(x_g, x_h);
+
+    // Stage s=2: (y0,y2),(y1,y3),(y4,y6),(y5,y7). Twiddles {1, I, 1, I}.
+    ulong y3I = gl_mul(y3, I_val);
+    ulong y7I = gl_mul(y7, I_val);
+    ulong z0 = gl_add(y0, y2);
+    ulong z2 = gl_sub(y0, y2);
+    ulong z1 = gl_add(y1, y3I);
+    ulong z3 = gl_sub(y1, y3I);
+    ulong z4 = gl_add(y4, y6);
+    ulong z6 = gl_sub(y4, y6);
+    ulong z5 = gl_add(y5, y7I);
+    ulong z7 = gl_sub(y5, y7I);
+
+    // Stage s=3: (z0,z4),(z1,z5),(z2,z6),(z3,z7).
+    // Twiddles: ω_8^0=1, ω_8^1=W8, ω_8^2=I, ω_8^3=W8c.
+    ulong z5w = gl_mul(z5, W8_val);
+    ulong z6I = gl_mul(z6, I_val);
+    ulong z7c = gl_mul(z7, W8c_val);
+
+    dst[(base_nat + 0u) * ncols + col] = gl_add(z0, z4);
+    dst[(base_nat + 1u) * ncols + col] = gl_add(z1, z5w);
+    dst[(base_nat + 2u) * ncols + col] = gl_add(z2, z6I);
+    dst[(base_nat + 3u) * ncols + col] = gl_add(z3, z7c);
+    dst[(base_nat + 4u) * ncols + col] = gl_sub(z0, z4);
+    dst[(base_nat + 5u) * ncols + col] = gl_sub(z1, z5w);
+    dst[(base_nat + 6u) * ncols + col] = gl_sub(z2, z6I);
+    dst[(base_nat + 7u) * ncols + col] = gl_sub(z3, z7c);
+}
+
 // ---- kernel: ntt_radix4_phase ---------------------------------------------
 // Combines two consecutive radix-2 DIT stages (s and s+1) into ONE pass over
 // the data. Produces the same output as running ntt_butterfly_phase twice at
@@ -307,19 +398,139 @@ kernel void ntt_radix4_phase(
     buf[offB1] = gl_sub(y_A1, t_B1p);
 }
 
+// ---- kernel: ntt_radix8_phase ---------------------------------------------
+// Combines THREE consecutive radix-2 DIT stages (s, s+1, s+2) into ONE pass
+// over the data. Produces the same output as running ntt_butterfly_phase
+// three times, cutting memory traffic by 3× relative to per-stage dispatches
+// and by 1.5× relative to radix-4.
+//
+// Derivation (DIT, 8 elements strided by M/8 within a combined group of M):
+//   M = 2^(s+2)   — combined group size
+//   S8 = M / 8   — stride between the 8 elements this thread processes
+//   For group g and intra-group position q ∈ [0, S8):
+//     x[i] = buf[g*M + q + i*S8],  i = 0..7
+//
+// Stage s   : 4 pair-butterflies (x0,x1),(x2,x3),(x4,x5),(x6,x7)
+//             twiddle w_a = ω_{M_a}^q  (M_a = 2^s, same twiddle for all 4)
+// Stage s+1 : 4 pair-butterflies (y0,y2),(y1,y3),(y4,y6),(y5,y7)
+//             twiddles w_{b0} = ω_{M_b}^q , w_{b1} = ω_{M_b}^{q + M_a/2}
+//             (M_b = 2^(s+1))
+// Stage s+2 : 4 pair-butterflies (z0,z4),(z1,z5),(z2,z6),(z3,z7)
+//             twiddles w_{c,i} = ω_{M_c}^{q + i*M_a/2}  i = 0..3
+//             (M_c = 2^(s+2))
+//
+// Twiddle reads (stride_s = s_global - s for the current `s`):
+//   w_a    = twiddles[q << stride_s]                        // ω_{M_a}^q
+//   w_{bi} = twiddles[(q + i*M_a/2) << (stride_s - 1)]      // ω_{M_b}^{·}
+//   w_{ci} = twiddles[(q + i*M_a/2) << (stride_s - 2)]      // ω_{M_c}^{·}
+//
+// Dispatch: (domain_size/8) * ncols threads.
+kernel void ntt_radix8_phase(
+    device ulong*         buf            [[ buffer(0) ]],
+    device const ulong*   twiddles       [[ buffer(1) ]],
+    constant uint&        ncols          [[ buffer(2) ]],
+    constant uint&        domain_size    [[ buffer(3) ]],
+    constant uint&        s              [[ buffer(4) ]],
+    constant uint&        stride_s       [[ buffer(5) ]],
+    uint tid [[ thread_position_in_grid ]]
+) {
+    uint eighth = domain_size >> 3u;
+    uint total  = eighth * ncols;
+    if (tid >= total) return;
+
+    uint idx = tid / ncols;
+    uint col = tid % ncols;
+
+    uint M    = 1u << (s + 2u);   // combined group size
+    uint S8   = M >> 3u;          // M/8 — stride within group
+    uint Ma_2 = 1u << (s - 1u);   // M_a/2 = 2^(s-1)
+
+    uint g = idx / S8;
+    uint q = idx % S8;
+
+    uint base = (g * M + q) * ncols + col;
+    uint step = S8 * ncols;
+
+    ulong x0 = buf[base            ];
+    ulong x1 = buf[base + 1u*step  ];
+    ulong x2 = buf[base + 2u*step  ];
+    ulong x3 = buf[base + 3u*step  ];
+    ulong x4 = buf[base + 4u*step  ];
+    ulong x5 = buf[base + 5u*step  ];
+    ulong x6 = buf[base + 6u*step  ];
+    ulong x7 = buf[base + 7u*step  ];
+
+    // Stage s: 4 butterflies with shared twiddle w_a
+    ulong w_a = twiddles[q << stride_s];
+    ulong t1 = gl_mul(x1, w_a);
+    ulong t3 = gl_mul(x3, w_a);
+    ulong t5 = gl_mul(x5, w_a);
+    ulong t7 = gl_mul(x7, w_a);
+    ulong y0 = gl_add(x0, t1);
+    ulong y1 = gl_sub(x0, t1);
+    ulong y2 = gl_add(x2, t3);
+    ulong y3 = gl_sub(x2, t3);
+    ulong y4 = gl_add(x4, t5);
+    ulong y5 = gl_sub(x4, t5);
+    ulong y6 = gl_add(x6, t7);
+    ulong y7 = gl_sub(x6, t7);
+
+    // Stage s+1: twiddles w_{b0}, w_{b1}
+    uint  stride_b = stride_s - 1u;
+    ulong w_b0 = twiddles[q << stride_b];
+    ulong w_b1 = twiddles[(q + Ma_2) << stride_b];
+    ulong u2 = gl_mul(y2, w_b0);
+    ulong u3 = gl_mul(y3, w_b1);
+    ulong u6 = gl_mul(y6, w_b0);
+    ulong u7 = gl_mul(y7, w_b1);
+    ulong z0 = gl_add(y0, u2);
+    ulong z2 = gl_sub(y0, u2);
+    ulong z1 = gl_add(y1, u3);
+    ulong z3 = gl_sub(y1, u3);
+    ulong z4 = gl_add(y4, u6);
+    ulong z6 = gl_sub(y4, u6);
+    ulong z5 = gl_add(y5, u7);
+    ulong z7 = gl_sub(y5, u7);
+
+    // Stage s+2: twiddles w_{c0..c3}
+    uint  stride_c = stride_s - 2u;
+    ulong w_c0 = twiddles[q << stride_c];
+    ulong w_c1 = twiddles[(q + Ma_2)      << stride_c];
+    ulong w_c2 = twiddles[(q + 2u*Ma_2)   << stride_c];
+    ulong w_c3 = twiddles[(q + 3u*Ma_2)   << stride_c];
+    ulong v4 = gl_mul(z4, w_c0);
+    ulong v5 = gl_mul(z5, w_c1);
+    ulong v6 = gl_mul(z6, w_c2);
+    ulong v7 = gl_mul(z7, w_c3);
+
+    buf[base            ] = gl_add(z0, v4);
+    buf[base + 1u*step  ] = gl_add(z1, v5);
+    buf[base + 2u*step  ] = gl_add(z2, v6);
+    buf[base + 3u*step  ] = gl_add(z3, v7);
+    buf[base + 4u*step  ] = gl_sub(z0, v4);
+    buf[base + 5u*step  ] = gl_sub(z1, v5);
+    buf[base + 6u*step  ] = gl_sub(z2, v6);
+    buf[base + 7u*step  ] = gl_sub(z3, v7);
+}
+
 // ---- kernel: intt_reorder_scale -------------------------------------------
 // Fused INTT finalization: combines the (N-i) % N reorder and the 1/N scale
 // into one in-place pass. Saves one full read+write pass over the buffer
 // and one command buffer commit+wait versus running intt_reorder followed
 // by intt_scale.
 //
-// Layout: each thread tid owns a "pair key" in [0, N/2]. The semantics:
-//   tid == 0            → position 0 is a fixed point (intt_idx(0,N)=0).
-//                         Just scale buf[0..ncols-1].
-//   tid in [1, N/2)     → pair (tid, N-tid). Swap + scale both positions.
-//   tid == N/2 (N even) → fixed point (N - N/2 = N/2). Just scale.
+// Parallelization: one thread per (pair_key, col) — dispatch
+// (N/2 + 1) × ncols threads. Each thread handles EXACTLY one pair-swap or
+// one fixed-point scale for a single column. This replaces the previous
+// (N/2 + 1)-thread kernel whose each thread looped over ncols columns
+// serially — at ncols=128 that was a 128× parallelism deficit.
 //
-// Dispatch: (N/2 + 1) threads per column group.
+// Mapping:
+//   pair_idx = tid / ncols     (pair key in [0, N/2])
+//   col      = tid % ncols
+//   pair_idx == 0                 → position (0, col) is a fixed point.
+//   pair_idx in [1, N/2)          → swap (pair_idx, col) with (N-pair_idx, col).
+//   pair_idx == N/2 (N even)      → fixed point (N - N/2 == N/2). Scale only.
 kernel void intt_reorder_scale(
     device ulong*    buf           [[ buffer(0) ]],
     constant uint&   domain_size   [[ buffer(1) ]],
@@ -327,42 +538,35 @@ kernel void intt_reorder_scale(
     constant ulong&  inv_n         [[ buffer(3) ]],
     uint tid [[ thread_position_in_grid ]]
 ) {
-    uint N  = domain_size;
-    uint hi = N - tid;  // intt_idx(tid, N) when tid != 0
+    uint pair_idx = tid / ncols;
+    uint col      = tid % ncols;
 
-    // Fixed points: tid == 0 (always), and tid == N/2 if N even.
-    if (tid == 0) {
-        for (uint c = 0; c < ncols; c++) {
-            uint idx = c;
+    uint N  = domain_size;
+    uint hi = N - pair_idx;  // intt_idx(pair_idx, N) when pair_idx != 0
+
+    if (pair_idx == 0) {
+        // Row 0 is a fixed point (intt_idx(0,N)=0). Scale in place.
+        uint idx = col;
+        buf[idx] = gl_canonicalize(gl_mul(buf[idx], inv_n));
+        return;
+    }
+    if (pair_idx >= hi) {
+        // pair_idx == hi → (N even, pair_idx == N/2), fixed point; scale.
+        // pair_idx > hi → out of range (dispatch rounded up); no-op.
+        if (pair_idx == hi) {
+            uint idx = pair_idx * ncols + col;
             buf[idx] = gl_canonicalize(gl_mul(buf[idx], inv_n));
         }
         return;
     }
-    if (tid >= hi) {
-        // If tid == hi (i.e. tid == N/2 and N even), this is a fixed point;
-        // scale it. Otherwise we've gone past the pair boundary — no-op.
-        if (tid == hi) {
-            for (uint c = 0; c < ncols; c++) {
-                uint idx = tid * ncols + c;
-                buf[idx] = gl_canonicalize(gl_mul(buf[idx], inv_n));
-            }
-        }
-        return;
-    }
 
-    // Normal pair: swap (tid, N-tid) with scale fused in.
-    //   Before: at position lo=tid,   value V_lo
-    //           at position hi=N-tid, value V_hi
-    //   After reorder: lo gets V_hi, hi gets V_lo
-    //   After scale:   each multiplied by inv_n
-    for (uint c = 0; c < ncols; c++) {
-        uint lo_idx = tid * ncols + c;
-        uint hi_idx = hi  * ncols + c;
-        ulong a = buf[lo_idx];
-        ulong b = buf[hi_idx];
-        buf[lo_idx] = gl_canonicalize(gl_mul(b, inv_n));
-        buf[hi_idx] = gl_canonicalize(gl_mul(a, inv_n));
-    }
+    // Normal pair: read-then-write to swap (pair_idx, hi) with scale fused in.
+    uint lo_idx = pair_idx * ncols + col;
+    uint hi_idx = hi       * ncols + col;
+    ulong a = buf[lo_idx];
+    ulong b = buf[hi_idx];
+    buf[lo_idx] = gl_canonicalize(gl_mul(b, inv_n));
+    buf[hi_idx] = gl_canonicalize(gl_mul(a, inv_n));
 }
 
 // ---- kernel: intt_reorder --------------------------------------------------

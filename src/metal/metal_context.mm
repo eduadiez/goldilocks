@@ -696,6 +696,45 @@ void metal_dispatch_ntt_rev_butterfly_s1s2(MetalCtxHandle ctx,
     }
 }
 
+void metal_dispatch_ntt_rev_butterfly_s1s2s3(MetalCtxHandle ctx,
+                                              MetalBufHandle src,
+                                              MetalBufHandle dst,
+                                              uint32_t domain_pow,
+                                              uint32_t ncols,
+                                              uint64_t I_val,
+                                              uint64_t W8_val,
+                                              uint64_t W8c_val) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        id<MTLComputePipelineState> pso =
+            (__bridge id<MTLComputePipelineState>)(
+                metal_context_pipeline(ctx, "ntt_rev_butterfly_s1s2s3"));
+
+        uint32_t eighth = (1u << domain_pow) >> 3;
+        uint32_t total  = eighth * ncols;
+
+        id<MTLCommandBuffer>        cmd = [impl->_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(src) offset:0 atIndex:0];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(dst) offset:0 atIndex:1];
+        [enc setBytes:&domain_pow length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&ncols      length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&I_val      length:sizeof(uint64_t) atIndex:4];
+        [enc setBytes:&W8_val     length:sizeof(uint64_t) atIndex:5];
+        [enc setBytes:&W8c_val    length:sizeof(uint64_t) atIndex:6];
+
+        NSUInteger tpg    = threadgroup_size_for(pso, 64);
+        NSUInteger groups = ((NSUInteger)total + tpg - 1) / tpg;
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+}
+
 void metal_dispatch_ntt_rev_butterfly_s1(MetalCtxHandle ctx,
                                           MetalBufHandle src,
                                           MetalBufHandle dst,
@@ -751,11 +790,16 @@ void metal_dispatch_ntt_butterfly_all_phases(MetalCtxHandle ctx,
         id<MTLComputePipelineState> pso_r4 =
             (__bridge id<MTLComputePipelineState>)(
                 metal_context_pipeline(ctx, "ntt_radix4_phase"));
+        id<MTLComputePipelineState> pso_r8 =
+            (__bridge id<MTLComputePipelineState>)(
+                metal_context_pipeline(ctx, "ntt_radix8_phase"));
 
         uint32_t half    = domain_size >> 1;
         uint32_t quarter = domain_size >> 2;
+        uint32_t eighth  = domain_size >> 3;
         uint32_t total_r2 = half    * ncols;
         uint32_t total_r4 = quarter * ncols;
+        uint32_t total_r8 = eighth  * ncols;
 
         id<MTLCommandBuffer>        cmd = [impl->_queue commandBuffer];
         id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
@@ -767,18 +811,26 @@ void metal_dispatch_ntt_butterfly_all_phases(MetalCtxHandle ctx,
 
         NSUInteger tpg_r2 = threadgroup_size_for(pso_r2, 64);
         NSUInteger tpg_r4 = threadgroup_size_for(pso_r4, 64);
+        NSUInteger tpg_r8 = threadgroup_size_for(pso_r8, 64);
         NSUInteger groups_r2 = ((NSUInteger)total_r2 + tpg_r2 - 1) / tpg_r2;
         NSUInteger groups_r4 = ((NSUInteger)total_r4 + tpg_r4 - 1) / tpg_r4;
+        NSUInteger groups_r8 = ((NSUInteger)total_r8 + tpg_r8 - 1) / tpg_r8;
 
-        // Radix-4 wins when the per-thread work is amortized across enough
-        // parallel dispatches to saturate the GPU. The driver criterion is
-        // the total number of radix-4 threads = (domain_size / 4) * ncols.
-        // Empirically on Apple M4 Pro the crossover is around 8192 threads
-        // total: below that the radix-2 path wins because its smaller
-        // per-thread register footprint gives higher occupancy. This covers
-        // both large-domain-small-ncols and small-domain-large-ncols shapes.
+        // Radix-k wins when the per-thread work is amortized across enough
+        // parallel dispatches to saturate the GPU. The crossover thresholds
+        // below are empirical on Apple M4 Pro: below R4_MIN_THREADS the
+        // per-thread register footprint of r4 kills occupancy; below
+        // R8_MIN_THREADS the same applies to r8 (even more registers per
+        // thread). Above the thresholds, fewer passes + more ILP wins.
         const uint32_t R4_MIN_THREADS = 8192;
+        // R8 per-thread register pressure is ~2× r4 (8 elements live + 7
+        // twiddles + intermediates). At small total-thread counts the GPU
+        // can't hide the occupancy drop even when data exceeds L1/L2; the
+        // crossover on M4 Pro sits near 128k threads (seen as a regression
+        // at N=2^18, ncols=1 just above the previous 32k threshold).
+        const uint32_t R8_MIN_THREADS = 131072;
         bool use_radix4 = (quarter * ncols >= R4_MIN_THREADS);
+        bool use_radix8 = (eighth  * ncols >= R8_MIN_THREADS);
 
         uint32_t s = start_s;
         bool first = true;
@@ -786,7 +838,16 @@ void metal_dispatch_ntt_butterfly_all_phases(MetalCtxHandle ctx,
             if (!first) [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
             first = false;
 
-            if (use_radix4 && s + 1 <= domain_pow && quarter > 0) {
+            if (use_radix8 && s + 2 <= domain_pow && eighth > 0 && s >= 1) {
+                // Radix-8: combines stages s, s+1, s+2 into one pass
+                [enc setComputePipelineState:pso_r8];
+                uint32_t stride_s = s_global - s;
+                [enc setBytes:&s         length:sizeof(uint32_t) atIndex:4];
+                [enc setBytes:&stride_s  length:sizeof(uint32_t) atIndex:5];
+                [enc dispatchThreadgroups:MTLSizeMake(groups_r8, 1, 1)
+                   threadsPerThreadgroup:MTLSizeMake(tpg_r8, 1, 1)];
+                s += 3;
+            } else if (use_radix4 && s + 1 <= domain_pow && quarter > 0) {
                 // Radix-4: combines stages s and s+1 into one pass
                 [enc setComputePipelineState:pso_r4];
                 uint32_t stride_s1 = s_global - (s + 1);
@@ -903,10 +964,10 @@ void metal_dispatch_intt_reorder_scale(MetalCtxHandle ctx,
         [enc setBytes:&ncols       length:sizeof(uint32_t) atIndex:2];
         [enc setBytes:&inv_n       length:sizeof(uint64_t) atIndex:3];
 
-        // Cover all pair keys tid in [0, N/2]. tid == 0 is the fixed point;
-        // tid in [1, N/2) are pairs; tid == N/2 is the second fixed point
-        // (only reached if N is even).
-        NSUInteger threads = (NSUInteger)(domain_size / 2 + 1);
+        // Dispatch (N/2 + 1) × ncols threads: one thread per (pair_key, col).
+        // pair_idx == 0 is the fixed point at row 0; pair_idx in [1, N/2)
+        // are swap-pairs; pair_idx == N/2 is the second fixed point (N even).
+        NSUInteger threads = (NSUInteger)(domain_size / 2 + 1) * ncols;
         NSUInteger tpg     = threadgroup_size_for(pso, 64);
         NSUInteger groups  = (threads + tpg - 1) / tpg;
         [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)

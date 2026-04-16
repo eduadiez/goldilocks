@@ -125,23 +125,43 @@ void NTT_Metal(Goldilocks::Element* dst,
             reinterpret_cast<const uint64_t*>(roots_raw),
             rlen);
 
-        if (dst != src && domainPow >= 2) {
-            // Fused rev + s=1 + s=2 in one pass (three passes collapsed).
-            // I = ω_4 = primitive 4th root of unity = roots[1 << (s_global - 2)].
+        if (dst != src && domainPow >= 3) {
+            // Fused rev + s=1 + s=2 + s=3 in one pass (four passes collapsed).
             int src_is_copy = 0;
             MetalBufHandle src_buf = metal_buf_alias(ctx, (void*)src,
                                                       data_bytes, &src_is_copy);
 
+            uint64_t I_val  = roots_raw[1ULL << (s_global - 2)].fe;  // ω_4
+            uint64_t W8_val = roots_raw[1ULL << (s_global - 3)].fe;  // ω_8
+            // ω_8^3 via Goldilocks field mul. Cheap: two mods, done once.
+            Goldilocks::Element w8_el  = Goldilocks::fromU64(W8_val);
+            Goldilocks::Element w8sq   = w8_el  * w8_el;
+            Goldilocks::Element w8_cub = w8sq   * w8_el;
+            uint64_t W8c_val = Goldilocks::toU64(w8_cub);
+
+            metal_dispatch_ntt_rev_butterfly_s1s2s3(
+                ctx, src_buf, dst_buf, domainPow, ncols32,
+                I_val, W8_val, W8c_val);
+
+            // Continue from phase s=4.
+            metal_dispatch_ntt_butterfly_all_phases(
+                ctx, dst_buf, tw_buf,
+                ncols32, domain32,
+                /*start_s=*/4, domainPow, s_global);
+
+            metal_buf_release(src_buf);
+        } else if (dst != src && domainPow == 2) {
+            // domainPow < 3: fall back to the 2-stage fused kernel.
+            int src_is_copy = 0;
+            MetalBufHandle src_buf = metal_buf_alias(ctx, (void*)src,
+                                                      data_bytes, &src_is_copy);
             uint64_t I_val = roots_raw[1ULL << (s_global - 2)].fe;
             metal_dispatch_ntt_rev_butterfly_s1s2(
                 ctx, src_buf, dst_buf, domainPow, ncols32, I_val);
-
-            // Continue from phase s=3.
             metal_dispatch_ntt_butterfly_all_phases(
                 ctx, dst_buf, tw_buf,
                 ncols32, domain32,
                 /*start_s=*/3, domainPow, s_global);
-
             metal_buf_release(src_buf);
         } else if (dst != src && domainPow == 1) {
             // Fallback to s=1-only fused kernel for N=2.

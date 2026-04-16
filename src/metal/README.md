@@ -227,6 +227,21 @@ void NTT_Metal(
 In-place (`src == dst`) and out-of-place supported. Out-of-place hits the
 fused-kernel fast path. `size` must be a power of two.
 
+**Performance note — prefer out-of-place for INTT.** The fused rev+s1+s2+s3
+kernel requires `src != dst`. When the caller passes in-place, the path
+falls back to a separate `reverse_permutation` pass plus the full phase
+loop — one extra memory pass. Measured deltas on M4 Pro at production
+shapes:
+
+| Shape           | in-place INTT | out-of-place INTT | Δ      |
+|-----------------|---------------|-------------------|--------|
+| N=2²⁰ × 1       | 3.1 ms (2.2× cpu) | 1.2 ms (5.6× cpu)  | 2.60×  |
+| N=2¹⁶ × 64      | 4.6 ms (1.5× cpu) | 2.8 ms (2.5× cpu)  | 1.68×  |
+| N=2¹⁸ × 128     | 21 ms (2.5× cpu)  | 20 ms (2.6× cpu)   | 1.06×  |
+
+The win is shape-dependent (largest at small-ncols) but never negative —
+callers who can spare a scratch buffer should always pass distinct pointers.
+
 ### `goldilocks_metal::allocate_aligned_elements`
 ```cpp
 Goldilocks::Element* allocate_aligned_elements(uint64_t n);

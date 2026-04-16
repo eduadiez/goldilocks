@@ -6,10 +6,58 @@
 **Shader compiler:** `xcrun metal` (Xcode 15+, Metal Toolchain component)
 **Build:** `-O3 -std=c++17 -fobjc-arc -DGOLDILOCKS_HAS_METAL`
 **Path exercised:** Metal GPU kernels (`PoseidonGoldilocks::merkletree_metal`, `NTT_Goldilocks::NTT_Metal`) compared vs scalar and NEON paths on the same chip, and against x86-64 AVX2 on Xeon D-2141I (see `x86_64-linux-xeon-d2141i.md`).
-**Commit:** `metal-gpu` branch — 17 commits covering incremental optimizations (fused kernels, radix-4 NTT butterfly, batched Merkle, specialized MDS mul, etc.).
+**Commit:** `metal-gpu` branch — incremental optimizations including fused kernels, radix-4/radix-8 NTT butterflies, fused rev+s1+s2+s3 initial NTT pass, batched Merkle, specialized MDS mul, `MTLCaptureManager`-gated GPU trace capture, and more.
 
 Bit-exact with the scalar/NEON reference on every workload measured
 (Fibonacci-seeded input → output root cross-checked via `memcmp`).
+
+---
+
+## 0. Summary — Xeon AVX2 / scalar vs M4 Pro NEON vs M4 Pro Metal
+
+Headline comparison at the benchmark shapes used by `benchs/bench.cpp`.
+All throughput numbers in MiB/s (higher is better); NTT/LDE in seconds
+(lower is better). Metal numbers are from the `bench_merkle`,
+`bench_ntt`, and NTT_BENCH-shape probe on M4 Pro. NEON numbers from
+`apple-silicon-m4pro-neon*.md`. Xeon numbers from
+`x86_64-linux-xeon-d2141i.md` (8-physical-core D-2141I, 2018).
+
+| Benchmark | Xeon AVX2 / scalar | M4 Pro NEON | **M4 Pro Metal** | Metal vs Xeon | Metal vs NEON |
+|-----------|---------------------|-------------|-------------------|---------------|---------------|
+| POSEIDON_BENCH_FULL    | 293.8 MiB/s (AVX2) | 481  | ≈ 1450 † | ≈ 4.93× | ≈ 3.01× |
+| POSEIDON_BENCH         | 292.0 (AVX2)       | 452  | ≈ 1450 † | ≈ 4.97× | ≈ 3.21× |
+| LINEAR_HASH_BENCH      | 189.8 (AVX2)       | 308  | ≈ 1450 † | ≈ 7.64× | ≈ 4.71× |
+| **MERKLETREE_BENCH**   | **182.3 (AVX2)**   | **473** | **1452** ‡     | **7.97×** | **2.80×** |
+| MERKLETREE_BATCH_BENCH | 162.7 (AVX2)       | 252  | ≈ 1440 §  | ≈ 8.85× | ≈ 5.71× |
+| **NTT_BENCH**          | **34.4 s (scalar)** | **7.23 s** | **0.60 s** ¶    | **57.3×** | **12.0×** |
+| NTT_BLOCK_BENCH        | 8.74 s (scalar)    | 2.12 s | not implemented | — | — |
+| LDE_BENCH              | 71.3 s (scalar)    | 15.2 s | not implemented | — | — |
+| LDE_BLOCK_BENCH        | 29.1 s (scalar)    | 10.2 s | not implemented | — | — |
+
+† Metal has no standalone Poseidon/linear-hash probe; the permutation is
+exercised only through `merkletree_metal`. Throughput is derived from
+the 8M × 128 Merkle result (§1) — same 41 ns/permutation rate applies.
+
+‡ MERKLETREE_BENCH at 8M rows × 128 cols (~8 GB input): Metal 5.64 s
+→ 1452 MiB/s. Direct probe result.
+
+§ Batched Merkle at multi-tree workloads shows ~1.00-1.05× over
+sequential Metal (see §7) — the per-tree kernels are already
+saturated, so the batch win is small. The throughput estimate carries
+sequential Metal's ≈ 1440 MiB/s forward.
+
+¶ NTT_BENCH shape (N = 2²³ × 100 cols, 6.25 GiB input): Metal
+**0.60 s** (median of 3 runs). There is no AVX2 NTT in the codebase —
+the Xeon column is scalar-only. The codebase's NEON NTT on M4 Pro is
+7.23 s on the same shape. Metal delivers **57× over Xeon scalar and
+12× over M4 NEON** on this workload.
+
+**Takeaway:** Metal on M4 Pro is 5-60× faster than Xeon D-2141I across
+the Poseidon/Merkle/NTT workload surface (where implemented). The win
+is largest on NTT (57× vs Xeon scalar, 12× vs NEON) because the GPU
+keeps all 20 cores busy on a workload the CPU runs with lots of
+memory stalls. LDE is still CPU-only — adding an `extendPol_Metal` is
+the obvious next step.
 
 ---
 
@@ -56,35 +104,46 @@ input. Below that, kernel launch overhead (~5 ms) dominates.
 
 ---
 
-## 3. NTT forward — `bench_ntt` measured shapes
+## 3. NTT forward + inverse — `bench_ntt` measured shapes
 
-From `benchs/metal_probes/bench_ntt`.
+From `benchs/metal_probes/bench_ntt`. Post-optimization numbers
+(radix-8 butterfly + fused rev+s1+s2+s3 + one-thread-per-(row,col)
+INTT reorder). Both forward and inverse timings reported; INTT
+timed both in-place (single-buffer) and out-of-place (distinct
+buffers → fused path, recommended — see `src/metal/README.md`).
 
-| Shape | NEON (ms) | **Metal (ms)** | Metal/NEON |
-|---|---:|---:|---:|
-| N=2¹⁴ × 1 | 0.25 | 0.44 | 0.56× (launch-bound) |
-| N=2¹⁶ × 1 | 0.46 | 0.46 | **1.00×** |
-| N=2¹⁸ × 1 | 1.49 | **1.00** | **1.50×** |
-| N=2²⁰ × 1 | 6.20 | **2.88** | **2.15×** |
-| N=2¹⁴ × 64 | 1.31 | 1.24 | **1.06×** |
-| N=2¹⁶ × 64 | 6.28 | **4.09** | **1.54×** |
-| N=2¹⁸ × 64 | 27.33 | **13.28** | **2.06×** |
-| N=2¹⁶ × 256 | 23.10 | **11.94** | **1.93×** |
-| **N=2¹⁸ × 128** (STARK shape) | 51.06 | **26.30** | **1.94×** |
+| Shape | NEON fwd (ms) | **Metal fwd (ms)** | Metal fwd/NEON | NEON INTT (ms) | Metal INTT out-of-place (ms) |
+|---|---:|---:|---:|---:|---:|
+| N=2¹⁴ × 1 | 0.26 | 0.44 | 0.59× (launch-bound) | 0.27 | 0.53 |
+| N=2¹⁶ × 1 | 0.37 | 0.37 | **1.00×** | 0.52 | 0.45 |
+| N=2¹⁸ × 1 | 1.49 | **0.47** | **3.16×** | 1.64 | **1.14** |
+| N=2²⁰ × 1 | 2.40 | **1.20** | **2.00×** | 6.73 | **1.20** |
+| N=2¹⁴ × 64 | 1.62 | **0.79** | **2.06×** | 1.43 | **0.79** |
+| N=2¹⁶ × 64 | 6.16 | **3.16** | **1.95×** | 6.77 | **2.75** |
+| N=2¹⁸ × 64 | 27.2 | **9.03** | **3.01×** | 28.7 | **10.3** |
+| N=2¹⁶ × 256 | 23.0 | **9.38** | **2.45×** | 24.8 | **10.3** |
+| **N=2¹⁸ × 128** (STARK shape) | **51.1** | **17.9** | **2.86×** | **53.4** | **20.2** |
+| **N=2²³ × 100** (NTT_BENCH) | **7230** | **600** | **12.05×** | — | — |
 
-The `bench.cpp::NTT_BENCH` workload (FFT_SIZE=2²³ × NUM_COLUMNS=100) wasn't
-directly measured in `bench_ntt`, but we have the CPU numbers from
-`benchcpu`:
+**Changes this session** (vs 1.94× NEON prior):
+1. **`ntt_radix8_phase`** — combines 3 stages per pass (vs radix-4's 2).
+   Gate: `(domain_size/8) × ncols ≥ 131 072`.
+2. **`ntt_rev_butterfly_s1s2s3`** — extends the fused initial kernel from
+   2 to 3 stages (rev + s=1 + s=2 + s=3 in one pass). Requires
+   `domain_pow ≥ 3` and src ≠ dst.
+3. **`intt_reorder_scale`** refactored — one-thread-per-(row, col) instead
+   of one-thread-per-row with a serial `for c in 0..ncols` loop. Cleaner
+   parallelism; marginal perf impact because the kernel is a small
+   fraction of total INTT time.
 
-| Variant | Time | Notes |
-|---|---:|---|
-| NTT_BENCH scalar (M4 Pro 14 threads) | 6.33 s | No AVX2 / NEON NTT path in the codebase — scalar-only |
-| NTT_BENCH scalar (Xeon D-2141I 16 threads) | 34.4 s | Same scalar code, slower core |
-| Metal estimate | ~3 s | Extrapolated from 2²⁰ × 1 Metal = 2.88 ms, scaled by domain and column factors |
+Combined, the flagship STARK shape N=2¹⁸ × 128 moved from **1.94× to
+2.86× NEON** (and NTT_BENCH at N=2²³ × 100 runs **12× faster than M4
+NEON and 57× faster than Xeon scalar** — 0.60 s for 6.25 GiB input).
 
-There is no AVX2 NTT implementation in this codebase (`NTT_BENCH_AVX` does
-not exist). The NEON implementation at `ntt_goldilocks.cpp:94-148` is the
-only SIMD NTT available. Our Metal path targets the same algorithm.
+There is no AVX2 NTT implementation in the upstream codebase
+(`NTT_BENCH_AVX` does not exist). The NEON implementation at
+`ntt_goldilocks.cpp:94-148` is the only SIMD NTT; Metal targets
+the same algorithm.
 
 ---
 
@@ -184,7 +243,7 @@ Measured on Xeon D-2141I (8-physical-core, 2018 server chip):
 
 ## 7. Optimization trajectory
 
-17 incremental commits on `metal-gpu` — summarized here. Each commit
+Incremental commits on `metal-gpu` — summarized here. Each commit
 message in `git log metal-gpu ^master` contains detailed before/after
 measurements.
 
@@ -201,6 +260,10 @@ measurements.
 | `cc50370` | **NTT radix-4 butterfly** | — | **1.79×** |
 | `650ede5` | NTT fused rev+s=1+s=2 | — | 1.88× |
 | `b44a88a` | NTT thread-count radix-4 gate | — | **2.03×** |
+| — (this session) | `ntt_radix8_phase` kernel (3 stages/pass) | — | 2.44× |
+| — (this session) | `ntt_rev_butterfly_s1s2s3` (rev + 3 stages) | — | **2.86×** |
+| — (this session) | `intt_reorder_scale` one-thread-per-(row,col) | — | — |
+| — (this session) | `bench_merkle` programmatic `MTLCaptureManager` (`MTL_CAPTURE_ENABLED=1`) | — | — |
 
 Also kept in-tree as selectable variants (measured, did NOT improve the
 default path):
