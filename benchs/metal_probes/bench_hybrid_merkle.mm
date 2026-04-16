@@ -149,6 +149,7 @@ int main(int argc, char** argv) {
         bench_shape(128, 262144,    3);
         if (big) {
             bench_shape(128, 1ULL << 20,  2);
+            // 8M × 128 = MERKLETREE_BENCH shape, ~8 GB input.
             bench_shape(128, 1ULL << 23,  1);
         }
     }
