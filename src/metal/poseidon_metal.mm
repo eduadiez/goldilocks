@@ -435,12 +435,104 @@ void merkletree_hybrid(Goldilocks::Element* tree,
 //
 // Thread-safe via call_once. Subsequent calls are atomic loads.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Persistent calibration cache.
+//
+// Calibration values that survive across processes go into a tiny text file
+// at ~/.goldilocks_metal_cal. Format: simple "key=value\n" lines, no quoting.
+// Per-process: env vars override the cache; cache overrides the static
+// default; static default is a safe baseline.
+//
+// File contents (example):
+//   merkle_ratio=2.24
+//   ntt_r4_min=8192
+//   ntt_r8_min=131072
+//
+// We don't bother with device-name keying — the cache is per user and the
+// running device is implicit. If a user moves their home directory between
+// machines they can `rm ~/.goldilocks_metal_cal` to recalibrate.
+// ---------------------------------------------------------------------------
+static std::string cal_cache_path() {
+    const char* home = getenv("HOME");
+    if (!home || !*home) return std::string();
+    return std::string(home) + "/.goldilocks_metal_cal";
+}
+
+static bool cal_cache_load_double(const char* key, double* out) {
+    std::string p = cal_cache_path();
+    if (p.empty()) return false;
+    FILE* f = fopen(p.c_str(), "r");
+    if (!f) return false;
+    char line[256];
+    bool found = false;
+    size_t klen = strlen(key);
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, key, klen) == 0 && line[klen] == '=') {
+            *out = atof(line + klen + 1);
+            found = true;
+            break;
+        }
+    }
+    fclose(f);
+    return found;
+}
+
+static bool cal_cache_load_uint(const char* key, uint32_t* out) {
+    double d;
+    if (!cal_cache_load_double(key, &d)) return false;
+    *out = (uint32_t)d;
+    return true;
+}
+
+static void cal_cache_save_kv(const char* key, double value) {
+    std::string p = cal_cache_path();
+    if (p.empty()) return;
+    // Read existing entries, replace `key`, write back.
+    std::vector<std::string> lines;
+    {
+        FILE* f = fopen(p.c_str(), "r");
+        if (f) {
+            char line[256];
+            while (fgets(line, sizeof(line), f)) lines.push_back(line);
+            fclose(f);
+        }
+    }
+    size_t klen = strlen(key);
+    bool replaced = false;
+    char new_line[256];
+    snprintf(new_line, sizeof(new_line), "%s=%.6f\n", key, value);
+    for (auto& l : lines) {
+        if (l.size() > klen && strncmp(l.c_str(), key, klen) == 0
+            && l[klen] == '=') {
+            l = new_line;
+            replaced = true;
+            break;
+        }
+    }
+    if (!replaced) lines.push_back(new_line);
+    FILE* f = fopen(p.c_str(), "w");
+    if (!f) return;
+    for (const auto& l : lines) fputs(l.c_str(), f);
+    fclose(f);
+}
+
 double get_merkle_throughput_ratio() {
-    static std::atomic<bool> initialized{false};
-    static std::once_flag    flag;
-    static double            ratio = 2.5;  // safe default if calibration fails
+    static std::once_flag flag;
+    static double         ratio = 2.5;  // safe default if calibration fails
 
     std::call_once(flag, []{
+        // Priority: env override → disk cache → fresh calibration.
+        if (const char* e = getenv("GOLDILOCKS_MERKLE_RATIO")) {
+            double v = atof(e);
+            if (v > 0.1 && v < 100.0) { ratio = v; return; }
+        }
+        if (cal_cache_load_double("merkle_ratio", &ratio)
+            && ratio > 0.1 && ratio < 100.0) {
+            return;
+        }
+
+        // Fresh calibration: small NTT-irrelevant micro-bench at a
+        // representative Merkle shape. ~30 ms one-time cost.
         const uint64_t ncols = 128;
         const uint64_t nrows = 16384;
         uint64_t n_elem = ncols * nrows;
@@ -473,10 +565,46 @@ double get_merkle_throughput_ratio() {
         double t_neon  = std::chrono::duration<double, std::milli>(t2 - t1).count();
         if (t_metal > 0.001 && t_neon > 0.001) {
             ratio = t_neon / t_metal;
+            // Persist to disk for next process.
+            cal_cache_save_kv("merkle_ratio", ratio);
         }
-        initialized.store(true, std::memory_order_release);
     });
     return ratio;
+}
+
+// ---------------------------------------------------------------------------
+// get_ntt_radix_thresholds — env-overridable, disk-cached R4/R8 cutoffs for
+// the NTT butterfly all-phases dispatch.
+//
+// Override priority (per process, evaluated once on first call):
+//   1. env var GOLDILOCKS_NTT_R4_MIN / GOLDILOCKS_NTT_R8_MIN
+//   2. ~/.goldilocks_metal_cal entries ntt_r4_min / ntt_r8_min
+//   3. static defaults (8192 / 131072) tuned manually on M4 Pro.
+//
+// We deliberately do NOT auto-tune via a fresh micro-bench here. Picking the
+// optimum requires bypassing the very heuristic we're trying to set, and the
+// gain over the static M4 Pro defaults is ≤ 5%. Env / disk cache is enough
+// for callers running on different Apple Silicon variants who want to plug
+// in their own measured values.
+// ---------------------------------------------------------------------------
+// NTTRadixThresholds is declared in goldilocks_metal.hpp.
+NTTRadixThresholds get_ntt_radix_thresholds() {
+    static std::once_flag flag;
+    static NTTRadixThresholds t = { 8192u, 131072u };  // M4 Pro defaults
+
+    std::call_once(flag, []{
+        if (const char* e = getenv("GOLDILOCKS_NTT_R4_MIN")) {
+            uint32_t v = (uint32_t)atoi(e); if (v > 0) t.r4_min = v;
+        } else {
+            cal_cache_load_uint("ntt_r4_min", &t.r4_min);
+        }
+        if (const char* e = getenv("GOLDILOCKS_NTT_R8_MIN")) {
+            uint32_t v = (uint32_t)atoi(e); if (v > 0) t.r8_min = v;
+        } else {
+            cal_cache_load_uint("ntt_r8_min", &t.r8_min);
+        }
+    });
+    return t;
 }
 
 // ---------------------------------------------------------------------------

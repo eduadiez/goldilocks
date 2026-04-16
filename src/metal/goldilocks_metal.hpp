@@ -138,10 +138,30 @@ namespace goldilocks_metal {
     // get_merkle_throughput_ratio: returns a one-time-cached double R such
     // that R = T_neon / T_metal for a representative Merkle workload
     // (currently 128 cols × 16384 rows on the running Apple Silicon GPU).
-    //   Triggers a ~30 ms calibration the first time it's called; cheap
-    //   atomic load thereafter. Thread-safe.
+    //
+    // Resolution order (evaluated once on first call):
+    //   1. env var GOLDILOCKS_MERKLE_RATIO        — for CI / manual override
+    //   2. ~/.goldilocks_metal_cal merkle_ratio=…  — disk cache from a
+    //      previous process's calibration (skips the ~30 ms cost on every
+    //      short-lived prover invocation)
+    //   3. fresh ~30 ms calibration; result is persisted to the disk cache
+    //      so the next process skips it.
+    //
+    //   Thread-safe (call_once-guarded).
     //   Used by merkletree_hybrid* to pick the optimal split:
     //     cpu_fraction = 1 / (1 + R)  → balances finishing times.
     double get_merkle_throughput_ratio();
+
+    // NTT radix-2/4/8 thread-count thresholds used by
+    // metal_dispatch_ntt_butterfly_all_phases. These were tuned manually
+    // on M4 Pro (8192 / 131072). Apple Silicon variants with different
+    // GPU core counts may benefit from different cutoffs.
+    //
+    // Resolution order (evaluated once on first call):
+    //   1. env vars GOLDILOCKS_NTT_R4_MIN / GOLDILOCKS_NTT_R8_MIN
+    //   2. ~/.goldilocks_metal_cal ntt_r4_min / ntt_r8_min
+    //   3. static M4 Pro defaults
+    struct NTTRadixThresholds { uint32_t r4_min; uint32_t r8_min; };
+    NTTRadixThresholds get_ntt_radix_thresholds();
 }
 #endif
