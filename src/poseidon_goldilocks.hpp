@@ -108,6 +108,17 @@ public:
 #ifdef GOLDILOCKS_HAS_METAL
     static void merkletree_metal(Goldilocks::Element *tree, Goldilocks::Element *input,
                                  uint64_t num_cols, uint64_t num_rows);
+
+    // Hybrid CPU NEON + GPU Metal Merkle build. Splits leaf-hashing by
+    // row between engines (NEON on rows [0, K), Metal on rows [K, N))
+    // then finishes with the parent reduction on Metal. `cpu_fraction`
+    // controls K — default 0.30 reflects the measured Metal ≈ 2.3× NEON
+    // ratio on Merkle at production scale. See src/metal/poseidon_metal.mm
+    // and benchs/metal_probes/bench_hybrid_merkle.mm.
+    static void merkletree_hybrid(Goldilocks::Element *tree,
+                                  Goldilocks::Element *input,
+                                  uint64_t num_cols, uint64_t num_rows,
+                                  double cpu_fraction = 0.30);
 #endif
 };
 

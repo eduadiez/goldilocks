@@ -59,5 +59,39 @@ namespace goldilocks_metal {
                                 uint64_t count,
                                 uint64_t num_cols,
                                 uint64_t num_rows);
+
+    // ----- Hybrid CPU+GPU Merkle building blocks ---------------------------
+    //
+    // merkletree_metal_leaves_only: GPU leaf hashing for a contiguous row
+    //   slice. tree_out must point to the slice start inside the caller's
+    //   full tree buffer (i.e. `tree + K*4` when this handles rows
+    //   [K, K+nrows_partial)). `input` must point to the matching row-major
+    //   input slice. Writes exactly nrows_partial × 4 elements. No parent
+    //   work performed.
+    void merkletree_metal_leaves_only(Goldilocks::Element* tree_out,
+                                      Goldilocks::Element* input,
+                                      uint64_t ncols,
+                                      uint64_t nrows_partial);
+
+    // merkletree_metal_parents_only: GPU parent-level reduction over leaves
+    //   already present at tree[0 .. nrows_total × 4). After this call the
+    //   tree buffer contains the full Merkle tree up to the root.
+    void merkletree_metal_parents_only(Goldilocks::Element* tree,
+                                       uint64_t nrows_total);
+
+    // merkletree_hybrid: CPU NEON + GPU Metal concurrent Merkle build.
+    //   Splits leaves by row: CPU handles [0, K), GPU handles [K, nrows),
+    //   where K = floor(nrows * cpu_fraction). Both run concurrently; then
+    //   the GPU performs the parent reduction over the full tree. Uses
+    //   unified memory — no host↔device copies.
+    //   cpu_fraction ∈ [0, 1]; empirical default on M4 Pro is ~0.30 (Metal
+    //   is ~2.3× NEON on Merkle, so CPU gets the smaller share).
+    //   Bit-exact with merkletree_metal / PoseidonGoldilocks::merkletree_neon
+    //   at any cpu_fraction.
+    void merkletree_hybrid(Goldilocks::Element* tree,
+                           Goldilocks::Element* input,
+                           uint64_t ncols,
+                           uint64_t nrows,
+                           double cpu_fraction);
 }
 #endif
