@@ -704,6 +704,14 @@ void PoseidonGoldilocks::merkletree_batch_neon(Goldilocks::Element *tree, Goldil
 }
 #endif // GOLDILOCKS_HAS_NEON
 
+#ifdef GOLDILOCKS_HAS_METAL
+#include "metal/goldilocks_metal.hpp"
+void PoseidonGoldilocks::merkletree_metal(Goldilocks::Element *tree, Goldilocks::Element *input,
+                                          uint64_t num_cols, uint64_t num_rows) {
+    goldilocks_metal::merkletree_metal(tree, input, num_cols, num_rows);
+}
+#endif
+
 #ifdef __AVX512__
 void PoseidonGoldilocks::hash_full_result_avx512(Goldilocks::Element *state, const Goldilocks::Element *input)
 {
