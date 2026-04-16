@@ -172,18 +172,43 @@ void NTT_Metal(Goldilocks::Element* dst,
             metal_dispatch_ntt_rev_butterfly_s1(
                 ctx, src_buf, dst_buf, domainPow, ncols32);
             metal_buf_release(src_buf);
-        } else {
-            // In-place path (src == dst) or trivial N=1.
+        } else if (dst == src && domainPow >= 3) {
+            // In-place fused-rev path via the persistent context scratch.
             //
-            // We tried gating in-place at small sizes through a fused-rev
-            // path with an internal scratch (`metal_buf_alloc` + memcpy),
-            // expecting that the 2-3 saved NTT passes would outweigh the
-            // alloc+copy. Measured: scratch overhead (~1.5 ms at 32 MB,
-            // dominated by Metal's `newBuffer` / page-mmap cost) always
-            // canceled the win at every shape we tested. Reverted.
-            // A persistent context-side scratch pool would amortize the
-            // alloc cost; revisit if a high-frequency in-place INTT
-            // caller emerges.
+            // The fused rev+s1+s2+s3 kernel saves 2-3 NTT passes vs the
+            // separate reverse_permutation + phase_loop. It needs src ≠
+            // dst, but the user passed in-place. Solution: copy the user
+            // buffer into a borrowed scratch (slot 0, owned by the metal
+            // context, lazily grown to the next power of two), then run
+            // fused with src=scratch, dst=user_buf.
+            //
+            // The scratch alloc is amortized: first call pays ~1.5 ms /
+            // 32 MB, every subsequent call of similar size pays 0. The
+            // memcpy is unavoidable but goes through the unified-memory
+            // shared buffer (no GPU upload).
+            MetalBufHandle scratch_buf =
+                metal_context_scratch_borrow(ctx, /*slot=*/0, data_bytes);
+            void* scratch_ptr = metal_buf_contents(scratch_buf);
+            std::memcpy(scratch_ptr, dst, data_bytes);
+
+            uint64_t I_val  = roots_raw[1ULL << (s_global - 2)].fe;
+            uint64_t W8_val = roots_raw[1ULL << (s_global - 3)].fe;
+            Goldilocks::Element w8_el  = Goldilocks::fromU64(W8_val);
+            Goldilocks::Element w8sq   = w8_el  * w8_el;
+            Goldilocks::Element w8_cub = w8sq   * w8_el;
+            uint64_t W8c_val = Goldilocks::toU64(w8_cub);
+
+            metal_dispatch_ntt_rev_butterfly_s1s2s3(
+                ctx, scratch_buf, dst_buf, domainPow, ncols32,
+                I_val, W8_val, W8c_val);
+            metal_dispatch_ntt_butterfly_all_phases(
+                ctx, dst_buf, tw_buf,
+                ncols32, domain32,
+                /*start_s=*/4, domainPow, s_global);
+            // Scratch is borrowed — do NOT release.
+        } else {
+            // Trivial fallback (domain_pow < 3 in-place; or sizes the
+            // scratch can't satisfy). Use the legacy slow path.
             if (dst != src) std::memcpy(dst, src, data_bytes);
             metal_dispatch_ntt_reverse_permutation(ctx, dst_buf, domainPow, ncols32);
             metal_dispatch_ntt_butterfly_all_phases(
@@ -296,6 +321,15 @@ void extendPol_Metal(Goldilocks::Element* output,
         //   INTT = (forward NTT butterflies) + (reorder + scale) — here we
         //   run the butterflies then replace the reorder+scale with the
         //   coset variant.
+        // Note: we tested the scratch-pool fused-rev path here (matching
+        // the optimization shipped in NTT_Metal) but it regressed by
+        // 5-7% at the typical LDE shapes (2¹⁸..2²⁰ × 32-128 cols). The
+        // memcpy cost of staging the full N×ncols buffer into scratch
+        // (~3-7 ms at 256 MB - 1 GB) exceeded the 2-3 saved NTT-pass
+        // bandwidth here. The plain in-place legacy path wins for
+        // extendPol's hot shapes. Standalone NTT_Metal still benefits
+        // from the scratch pool because its INTT input is the user's
+        // primary buffer (no double-aliasing cost).
         uint32_t s_global_N = ntt_ctx->get_s();
         const uint64_t* roots_N = reinterpret_cast<const uint64_t*>(
             ntt_ctx->roots_ptr());
@@ -335,6 +369,9 @@ void extendPol_Metal(Goldilocks::Element* output,
         uint64_t rlen_Ext = ntt_extension.roots_len();
         MetalBufHandle tw_Ext = metal_twiddle_buffer(ctx, roots_Ext, rlen_Ext);
 
+        // Forward NTT in-place. Same scratch trade-off as step 3 above —
+        // the bigger N_Extended buffer makes memcpy even more costly,
+        // so the in-place dispatch wins.
         metal_dispatch_ntt_reverse_permutation(
             ctx, out_buf, domainPow_Ext, ncols32);
         metal_dispatch_ntt_butterfly_all_phases(
