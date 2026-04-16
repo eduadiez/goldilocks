@@ -35,9 +35,10 @@ inline uint reverse_bits32(uint x) {
 // tid = thread index in [0, domain_size)  (one per row, all cols handled)
 // domainPow = log2(domain_size)
 kernel void ntt_reverse_permutation(
-    device ulong*   buf       [[ buffer(0) ]],
-    constant uint&  domainPow [[ buffer(1) ]],
-    constant uint&  ncols     [[ buffer(2) ]],
+    device ulong*   buf          [[ buffer(0) ]],
+    constant uint&  domainPow    [[ buffer(1) ]],
+    constant uint&  ncols        [[ buffer(2) ]],
+    constant uint&  ncols_stride [[ buffer(3) ]],
     uint tid [[ thread_position_in_grid ]]
 ) {
     uint domain_size = 1u << domainPow;
@@ -46,8 +47,8 @@ kernel void ntt_reverse_permutation(
     uint rev = reverse_bits32(tid) >> (32 - domainPow);
     if (rev <= tid) return;  // only process each pair once
 
-    uint src = tid  * ncols;
-    uint dst = rev  * ncols;
+    uint src = tid  * ncols_stride;
+    uint dst = rev  * ncols_stride;
     for (uint c = 0; c < ncols; c++) {
         ulong tmp     = buf[src + c];
         buf[src + c]  = buf[dst + c];
@@ -86,6 +87,15 @@ kernel void ntt_reverse_permutation(
 // ntt_goldilocks.hpp:169-172). `roots_stride_shift` is the per-call
 // stride = s_global - s. This removes the per-phase twiddle buffer
 // allocation + upload that dominated small-N and multi-column runs.
+// ncols_stride parameter: separates "columns this kernel processes per row"
+// (ncols, used for thread layout) from "row stride in the buffer"
+// (ncols_stride, used for memory addressing). When equal (the default for
+// callers that own the whole matrix), behavior is identical to the legacy
+// path. When ncols < ncols_stride, the kernel processes a CONTIGUOUS
+// SLICE of `ncols` columns starting at the buffer's current pointer
+// (callers offset the buffer by col_offset × sizeof(Element) to address
+// any starting column). This unlocks zero-copy column-split hybrid
+// CPU+GPU dispatch.
 kernel void ntt_butterfly_phase(
     device ulong*         buf                  [[ buffer(0) ]],
     device const ulong*   twiddles             [[ buffer(1) ]],
@@ -93,6 +103,7 @@ kernel void ntt_butterfly_phase(
     constant uint&        domain_size          [[ buffer(3) ]],
     constant uint&        s                    [[ buffer(4) ]],
     constant uint&        roots_stride_shift   [[ buffer(5) ]],
+    constant uint&        ncols_stride         [[ buffer(6) ]],
     uint tid [[ thread_position_in_grid ]]
 ) {
     uint half_n = domain_size >> 1;
@@ -107,8 +118,8 @@ kernel void ntt_butterfly_phase(
     uint g     = pair_idx / mdiv2;
     uint j     = pair_idx % mdiv2;
 
-    uint off2 = (g * m + j) * ncols + col;
-    uint off1 = (g * m + j + mdiv2) * ncols + col;
+    uint off2 = (g * m + j) * ncols_stride + col;
+    uint off1 = (g * m + j + mdiv2) * ncols_stride + col;
 
     ulong w = twiddles[j << roots_stride_shift];
     ulong u = buf[off2];
@@ -136,10 +147,11 @@ kernel void ntt_butterfly_phase(
 // Dispatch: (domain_size / 2) × ncols threads. Thread tid handles one
 // (butterfly-pair, column) pair.
 kernel void ntt_rev_butterfly_s1(
-    device const ulong* src        [[ buffer(0) ]],  // input (natural order)
-    device       ulong* dst        [[ buffer(1) ]],  // output (perm + s=1 butterfly)
-    constant     uint&  domain_pow [[ buffer(2) ]],
-    constant     uint&  ncols      [[ buffer(3) ]],
+    device const ulong* src          [[ buffer(0) ]],  // input (natural order)
+    device       ulong* dst          [[ buffer(1) ]],  // output (perm + s=1 butterfly)
+    constant     uint&  domain_pow   [[ buffer(2) ]],
+    constant     uint&  ncols        [[ buffer(3) ]],
+    constant     uint&  ncols_stride [[ buffer(4) ]],
     uint tid [[ thread_position_in_grid ]]
 ) {
     uint half_n = (1u << domain_pow) >> 1;
@@ -153,11 +165,11 @@ kernel void ntt_rev_butterfly_s1(
     uint src_a = reverse_bits32(pair_idx * 2u)      >> shift;
     uint src_b = reverse_bits32(pair_idx * 2u + 1u) >> shift;
 
-    ulong u = src[src_a * ncols + col];
-    ulong t = src[src_b * ncols + col];
+    ulong u = src[src_a * ncols_stride + col];
+    ulong t = src[src_b * ncols_stride + col];
 
-    dst[(pair_idx * 2u)      * ncols + col] = gl_add(u, t);
-    dst[(pair_idx * 2u + 1u) * ncols + col] = gl_sub(u, t);
+    dst[(pair_idx * 2u)      * ncols_stride + col] = gl_add(u, t);
+    dst[(pair_idx * 2u + 1u) * ncols_stride + col] = gl_sub(u, t);
 }
 
 // ---- kernel: ntt_rev_butterfly_s1s2 ---------------------------------------
@@ -179,11 +191,12 @@ kernel void ntt_rev_butterfly_s1(
 // Dispatch: (domain_size / 4) × ncols threads. Thread tid handles one
 // (quad-butterfly, column) pair.
 kernel void ntt_rev_butterfly_s1s2(
-    device const ulong* src        [[ buffer(0) ]],
-    device       ulong* dst        [[ buffer(1) ]],
-    constant     uint&  domain_pow [[ buffer(2) ]],
-    constant     uint&  ncols      [[ buffer(3) ]],
-    constant     ulong& I_val      [[ buffer(4) ]],  // = ω_4 (primitive 4th root of unity)
+    device const ulong* src          [[ buffer(0) ]],
+    device       ulong* dst          [[ buffer(1) ]],
+    constant     uint&  domain_pow   [[ buffer(2) ]],
+    constant     uint&  ncols        [[ buffer(3) ]],
+    constant     ulong& I_val        [[ buffer(4) ]],  // = ω_4 (primitive 4th root of unity)
+    constant     uint&  ncols_stride [[ buffer(5) ]],
     uint tid [[ thread_position_in_grid ]]
 ) {
     uint quarter = (1u << domain_pow) >> 2;
@@ -202,10 +215,10 @@ kernel void ntt_rev_butterfly_s1s2(
     uint rc = reverse_bits32(base_nat + 2u) >> shift;
     uint rd = reverse_bits32(base_nat + 3u) >> shift;
 
-    ulong x_a = src[ra * ncols + col];
-    ulong x_b = src[rb * ncols + col];
-    ulong x_c = src[rc * ncols + col];
-    ulong x_d = src[rd * ncols + col];
+    ulong x_a = src[ra * ncols_stride + col];
+    ulong x_b = src[rb * ncols_stride + col];
+    ulong x_c = src[rc * ncols_stride + col];
+    ulong x_d = src[rd * ncols_stride + col];
 
     // Stage s=1 (within-pair): twiddle = 1, no mul.
     ulong y0 = gl_add(x_a, x_b);     // = rev(4g+0) + rev(4g+1)
@@ -216,10 +229,10 @@ kernel void ntt_rev_butterfly_s1s2(
     // Stage s=2: butterflies (y0, y2) with twiddle 1, (y1, y3) with twiddle I.
     ulong yI = gl_mul(y3, I_val);
 
-    dst[(base_nat + 0u) * ncols + col] = gl_add(y0, y2);
-    dst[(base_nat + 1u) * ncols + col] = gl_add(y1, yI);
-    dst[(base_nat + 2u) * ncols + col] = gl_sub(y0, y2);
-    dst[(base_nat + 3u) * ncols + col] = gl_sub(y1, yI);
+    dst[(base_nat + 0u) * ncols_stride + col] = gl_add(y0, y2);
+    dst[(base_nat + 1u) * ncols_stride + col] = gl_add(y1, yI);
+    dst[(base_nat + 2u) * ncols_stride + col] = gl_sub(y0, y2);
+    dst[(base_nat + 3u) * ncols_stride + col] = gl_sub(y1, yI);
 }
 
 // ---- kernel: ntt_rev_butterfly_s1s2s3 -------------------------------------
@@ -245,6 +258,7 @@ kernel void ntt_rev_butterfly_s1s2s3(
     constant     ulong& I_val        [[ buffer(4) ]],  // ω_4
     constant     ulong& W8_val       [[ buffer(5) ]],  // ω_8
     constant     ulong& W8c_val      [[ buffer(6) ]],  // ω_8^3
+    constant     uint&  ncols_stride [[ buffer(7) ]],
     uint tid [[ thread_position_in_grid ]]
 ) {
     uint eighth = (1u << domain_pow) >> 3u;
@@ -266,14 +280,14 @@ kernel void ntt_rev_butterfly_s1s2s3(
     uint rg = reverse_bits32(base_nat + 6u) >> shift;
     uint rh = reverse_bits32(base_nat + 7u) >> shift;
 
-    ulong x_a = src[ra * ncols + col];
-    ulong x_b = src[rb * ncols + col];
-    ulong x_c = src[rc * ncols + col];
-    ulong x_d = src[rd * ncols + col];
-    ulong x_e = src[re * ncols + col];
-    ulong x_f = src[rf * ncols + col];
-    ulong x_g = src[rg * ncols + col];
-    ulong x_h = src[rh * ncols + col];
+    ulong x_a = src[ra * ncols_stride + col];
+    ulong x_b = src[rb * ncols_stride + col];
+    ulong x_c = src[rc * ncols_stride + col];
+    ulong x_d = src[rd * ncols_stride + col];
+    ulong x_e = src[re * ncols_stride + col];
+    ulong x_f = src[rf * ncols_stride + col];
+    ulong x_g = src[rg * ncols_stride + col];
+    ulong x_h = src[rh * ncols_stride + col];
 
     // Stage s=1: 4 pair butterflies, twiddle = 1
     ulong y0 = gl_add(x_a, x_b);
@@ -303,14 +317,14 @@ kernel void ntt_rev_butterfly_s1s2s3(
     ulong z6I = gl_mul(z6, I_val);
     ulong z7c = gl_mul(z7, W8c_val);
 
-    dst[(base_nat + 0u) * ncols + col] = gl_add(z0, z4);
-    dst[(base_nat + 1u) * ncols + col] = gl_add(z1, z5w);
-    dst[(base_nat + 2u) * ncols + col] = gl_add(z2, z6I);
-    dst[(base_nat + 3u) * ncols + col] = gl_add(z3, z7c);
-    dst[(base_nat + 4u) * ncols + col] = gl_sub(z0, z4);
-    dst[(base_nat + 5u) * ncols + col] = gl_sub(z1, z5w);
-    dst[(base_nat + 6u) * ncols + col] = gl_sub(z2, z6I);
-    dst[(base_nat + 7u) * ncols + col] = gl_sub(z3, z7c);
+    dst[(base_nat + 0u) * ncols_stride + col] = gl_add(z0, z4);
+    dst[(base_nat + 1u) * ncols_stride + col] = gl_add(z1, z5w);
+    dst[(base_nat + 2u) * ncols_stride + col] = gl_add(z2, z6I);
+    dst[(base_nat + 3u) * ncols_stride + col] = gl_add(z3, z7c);
+    dst[(base_nat + 4u) * ncols_stride + col] = gl_sub(z0, z4);
+    dst[(base_nat + 5u) * ncols_stride + col] = gl_sub(z1, z5w);
+    dst[(base_nat + 6u) * ncols_stride + col] = gl_sub(z2, z6I);
+    dst[(base_nat + 7u) * ncols_stride + col] = gl_sub(z3, z7c);
 }
 
 // ---- kernel: ntt_radix4_phase ---------------------------------------------
@@ -349,6 +363,7 @@ kernel void ntt_radix4_phase(
     constant uint&        domain_size    [[ buffer(3) ]],
     constant uint&        s              [[ buffer(4) ]],
     constant uint&        stride_s1      [[ buffer(5) ]],
+    constant uint&        ncols_stride   [[ buffer(6) ]],
     uint tid [[ thread_position_in_grid ]]
 ) {
     uint quarter = domain_size >> 2u;
@@ -365,12 +380,12 @@ kernel void ntt_radix4_phase(
     uint g = idx / M_div_4;
     uint q = idx % M_div_4;
 
-    // Position offsets within the buffer (scaled by ncols for stride)
+    // Position offsets within the buffer (using ncols_stride for row stride)
     uint base_elem = g * M + q;
-    uint offA0 = base_elem * ncols + col;
-    uint offA1 = (base_elem + M_div_4) * ncols + col;
-    uint offB0 = (base_elem + M_div_2) * ncols + col;
-    uint offB1 = (base_elem + M_div_2 + M_div_4) * ncols + col;
+    uint offA0 = base_elem * ncols_stride + col;
+    uint offA1 = (base_elem + M_div_4) * ncols_stride + col;
+    uint offB0 = (base_elem + M_div_2) * ncols_stride + col;
+    uint offB1 = (base_elem + M_div_2 + M_div_4) * ncols_stride + col;
 
     ulong x_A0 = buf[offA0];
     ulong x_A1 = buf[offA1];
@@ -432,6 +447,7 @@ kernel void ntt_radix8_phase(
     constant uint&        domain_size    [[ buffer(3) ]],
     constant uint&        s              [[ buffer(4) ]],
     constant uint&        stride_s       [[ buffer(5) ]],
+    constant uint&        ncols_stride   [[ buffer(6) ]],
     uint tid [[ thread_position_in_grid ]]
 ) {
     uint eighth = domain_size >> 3u;
@@ -448,8 +464,8 @@ kernel void ntt_radix8_phase(
     uint g = idx / S8;
     uint q = idx % S8;
 
-    uint base = (g * M + q) * ncols + col;
-    uint step = S8 * ncols;
+    uint base = (g * M + q) * ncols_stride + col;
+    uint step = S8 * ncols_stride;
 
     ulong x0 = buf[base            ];
     ulong x1 = buf[base + 1u*step  ];
@@ -536,6 +552,7 @@ kernel void intt_reorder_scale(
     constant uint&   domain_size   [[ buffer(1) ]],
     constant uint&   ncols         [[ buffer(2) ]],
     constant ulong&  inv_n         [[ buffer(3) ]],
+    constant uint&   ncols_stride  [[ buffer(4) ]],
     uint tid [[ thread_position_in_grid ]]
 ) {
     uint pair_idx = tid / ncols;
@@ -554,15 +571,15 @@ kernel void intt_reorder_scale(
         // pair_idx == hi → (N even, pair_idx == N/2), fixed point; scale.
         // pair_idx > hi → out of range (dispatch rounded up); no-op.
         if (pair_idx == hi) {
-            uint idx = pair_idx * ncols + col;
+            uint idx = pair_idx * ncols_stride + col;
             buf[idx] = gl_canonicalize(gl_mul(buf[idx], inv_n));
         }
         return;
     }
 
     // Normal pair: read-then-write to swap (pair_idx, hi) with scale fused in.
-    uint lo_idx = pair_idx * ncols + col;
-    uint hi_idx = hi       * ncols + col;
+    uint lo_idx = pair_idx * ncols_stride + col;
+    uint hi_idx = hi       * ncols_stride + col;
     ulong a = buf[lo_idx];
     ulong b = buf[hi_idx];
     buf[lo_idx] = gl_canonicalize(gl_mul(b, inv_n));
@@ -585,6 +602,7 @@ kernel void intt_reorder_coset_scale(
     device const ulong*      r_inv         [[ buffer(1) ]],
     constant uint&           domain_size   [[ buffer(2) ]],
     constant uint&           ncols         [[ buffer(3) ]],
+    constant uint&           ncols_stride  [[ buffer(4) ]],
     uint tid [[ thread_position_in_grid ]]
 ) {
     uint pair_idx = tid / ncols;
@@ -600,7 +618,7 @@ kernel void intt_reorder_coset_scale(
     }
     if (pair_idx >= hi) {
         if (pair_idx == hi) {
-            uint idx = pair_idx * ncols + col;
+            uint idx = pair_idx * ncols_stride + col;
             buf[idx] = gl_canonicalize(gl_mul(buf[idx], r_inv[pair_idx]));
         }
         return;
@@ -609,8 +627,8 @@ kernel void intt_reorder_coset_scale(
     // Pair (pair_idx, hi): read both, swap with per-destination coset scale.
     //   output[pair_idx] = input[hi]       * r_inv[pair_idx]
     //   output[hi]       = input[pair_idx] * r_inv[hi]
-    uint lo_idx = pair_idx * ncols + col;
-    uint hi_idx = hi       * ncols + col;
+    uint lo_idx = pair_idx * ncols_stride + col;
+    uint hi_idx = hi       * ncols_stride + col;
     ulong a = buf[lo_idx];
     ulong b = buf[hi_idx];
     buf[lo_idx] = gl_canonicalize(gl_mul(b, r_inv[pair_idx]));

@@ -124,6 +124,17 @@ bench_hybrid_ntt: bench_hybrid_ntt.mm $(METAL_BRIDGE_SRCS) $(GL_SRC)/metal/ntt_m
 	    bench_hybrid_ntt.mm $(METAL_BRIDGE_SRCS) $(GL_SRC)/metal/ntt_metal.mm \
 	    $(NTT_CPU_OBJ) $(GL_LIBS) -o $@
 
+# Zero-copy hybrid NTT via the new column-stride kernels: GPU operates on
+# a contiguous slice in-place via NTT_Metal_partial; CPU's share is still
+# extracted/merged because NEON NTT lacks stride support yet.
+bench_hybrid_ntt_v2: bench_hybrid_ntt_v2.mm $(METAL_BRIDGE_SRCS) $(GL_SRC)/metal/ntt_metal.mm
+	$(CXX) -std=c++17 -O3 -fobjc-arc -ObjC++ $(MTL_FRAMEWORKS) \
+	    $(GL_INC) $(OMP_FLAGS) \
+	    -DGOLDILOCKS_HAS_METAL \
+	    -DMTL_KERNEL_DIR=\"$(MTL_KERNEL_DIR)\" \
+	    bench_hybrid_ntt_v2.mm $(METAL_BRIDGE_SRCS) $(GL_SRC)/metal/ntt_metal.mm \
+	    $(NTT_CPU_OBJ) $(GL_LIBS) -o $@
+
 # Hybrid batched Merkle: tree-count split (whole trees on each engine).
 # This is the variant that scales beyond the within-tree-split 1M-row limit.
 bench_hybrid_batch: bench_hybrid_batch.mm $(METAL_BRIDGE_SRCS)

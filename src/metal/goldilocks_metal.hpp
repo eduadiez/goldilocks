@@ -16,6 +16,29 @@ namespace goldilocks_metal {
     void NTT_Metal(Goldilocks::Element* dst, Goldilocks::Element* src,
                    uint64_t size, uint64_t ncols, NTT_Goldilocks* ntt_ctx, bool inverse);
 
+    // NTT_Metal_partial: forward (or inverse) NTT on a CONTIGUOUS COLUMN
+    // SLICE of a wider matrix. The buffers `dst` and `src` are slices laid
+    // out as `buf[row * ncols_stride + col]` for col ∈ [0, ncols_proc),
+    // with rows starting at `buf` (callers offset by col_offset * 8 bytes
+    // to address any starting column of a wider matrix).
+    //
+    // ncols_proc  = number of columns this call processes per row
+    // ncols_stride = row stride (≥ ncols_proc); the wider matrix's stride
+    //
+    // Use case: zero-copy hybrid CPU+GPU NTT. The GPU runs this with
+    // ncols_proc < ncols_stride to process its column slice, while the
+    // CPU concurrently runs NEON NTT on the remaining cols of the same
+    // wider buffer. No memcpy split/reassemble required.
+    //
+    // Bit-exact with NTT_Metal when ncols_proc == ncols_stride.
+    void NTT_Metal_partial(Goldilocks::Element* dst,
+                           Goldilocks::Element* src,
+                           uint64_t size,
+                           uint64_t ncols_proc,
+                           uint64_t ncols_stride,
+                           NTT_Goldilocks* ntt_ctx,
+                           bool inverse);
+
     // Low-Degree Extension. Mirrors NTT_Goldilocks::extendPol semantics:
     //   1. Copy `input` (N × ncols) into the first N×ncols of `output`.
     //   2. INTT butterflies on that region; apply coset reorder+scale using

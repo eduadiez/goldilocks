@@ -689,7 +689,9 @@ void metal_dispatch_merkle_parents_all_levels(MetalCtxHandle ctx,
 void metal_dispatch_ntt_reverse_permutation(MetalCtxHandle ctx,
                                              MetalBufHandle buf,
                                              uint32_t domainPow,
-                                             uint32_t ncols) {
+                                             uint32_t ncols,
+                                             uint32_t ncols_stride) {
+    if (ncols_stride == 0) ncols_stride = ncols;
     @autoreleasepool {
         GoldilocksMetalContext* impl = get_impl(ctx);
         id<MTLComputePipelineState> pso =
@@ -703,8 +705,9 @@ void metal_dispatch_ntt_reverse_permutation(MetalCtxHandle ctx,
 
         [enc setComputePipelineState:pso];
         [enc setBuffer:(__bridge id<MTLBuffer>)(buf) offset:0 atIndex:0];
-        [enc setBytes:&domainPow  length:sizeof(uint32_t) atIndex:1];
-        [enc setBytes:&ncols      length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&domainPow    length:sizeof(uint32_t) atIndex:1];
+        [enc setBytes:&ncols        length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&ncols_stride length:sizeof(uint32_t) atIndex:3];
 
         NSUInteger tpg = threadgroup_size_for(pso, 64);
         NSUInteger groups = ((NSUInteger)domain_size + tpg - 1) / tpg;
@@ -724,7 +727,9 @@ void metal_dispatch_ntt_rev_butterfly_s1s2(MetalCtxHandle ctx,
                                              MetalBufHandle dst,
                                              uint32_t domain_pow,
                                              uint32_t ncols,
-                                             uint64_t I_val) {
+                                             uint64_t I_val,
+                                             uint32_t ncols_stride) {
+    if (ncols_stride == 0) ncols_stride = ncols;
     @autoreleasepool {
         GoldilocksMetalContext* impl = get_impl(ctx);
         id<MTLComputePipelineState> pso =
@@ -740,9 +745,10 @@ void metal_dispatch_ntt_rev_butterfly_s1s2(MetalCtxHandle ctx,
         [enc setComputePipelineState:pso];
         [enc setBuffer:(__bridge id<MTLBuffer>)(src) offset:0 atIndex:0];
         [enc setBuffer:(__bridge id<MTLBuffer>)(dst) offset:0 atIndex:1];
-        [enc setBytes:&domain_pow length:sizeof(uint32_t) atIndex:2];
-        [enc setBytes:&ncols      length:sizeof(uint32_t) atIndex:3];
-        [enc setBytes:&I_val      length:sizeof(uint64_t) atIndex:4];
+        [enc setBytes:&domain_pow   length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&ncols        length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&I_val        length:sizeof(uint64_t) atIndex:4];
+        [enc setBytes:&ncols_stride length:sizeof(uint32_t) atIndex:5];
 
         NSUInteger tpg    = threadgroup_size_for(pso, 64);
         NSUInteger groups = ((NSUInteger)total + tpg - 1) / tpg;
@@ -761,7 +767,9 @@ void metal_dispatch_ntt_rev_butterfly_s1s2s3(MetalCtxHandle ctx,
                                               uint32_t ncols,
                                               uint64_t I_val,
                                               uint64_t W8_val,
-                                              uint64_t W8c_val) {
+                                              uint64_t W8c_val,
+                                              uint32_t ncols_stride) {
+    if (ncols_stride == 0) ncols_stride = ncols;
     @autoreleasepool {
         GoldilocksMetalContext* impl = get_impl(ctx);
         id<MTLComputePipelineState> pso =
@@ -777,11 +785,12 @@ void metal_dispatch_ntt_rev_butterfly_s1s2s3(MetalCtxHandle ctx,
         [enc setComputePipelineState:pso];
         [enc setBuffer:(__bridge id<MTLBuffer>)(src) offset:0 atIndex:0];
         [enc setBuffer:(__bridge id<MTLBuffer>)(dst) offset:0 atIndex:1];
-        [enc setBytes:&domain_pow length:sizeof(uint32_t) atIndex:2];
-        [enc setBytes:&ncols      length:sizeof(uint32_t) atIndex:3];
-        [enc setBytes:&I_val      length:sizeof(uint64_t) atIndex:4];
-        [enc setBytes:&W8_val     length:sizeof(uint64_t) atIndex:5];
-        [enc setBytes:&W8c_val    length:sizeof(uint64_t) atIndex:6];
+        [enc setBytes:&domain_pow   length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&ncols        length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&I_val        length:sizeof(uint64_t) atIndex:4];
+        [enc setBytes:&W8_val       length:sizeof(uint64_t) atIndex:5];
+        [enc setBytes:&W8c_val      length:sizeof(uint64_t) atIndex:6];
+        [enc setBytes:&ncols_stride length:sizeof(uint32_t) atIndex:7];
 
         NSUInteger tpg    = threadgroup_size_for(pso, 64);
         NSUInteger groups = ((NSUInteger)total + tpg - 1) / tpg;
@@ -797,7 +806,9 @@ void metal_dispatch_ntt_rev_butterfly_s1(MetalCtxHandle ctx,
                                           MetalBufHandle src,
                                           MetalBufHandle dst,
                                           uint32_t domain_pow,
-                                          uint32_t ncols) {
+                                          uint32_t ncols,
+                                          uint32_t ncols_stride) {
+    if (ncols_stride == 0) ncols_stride = ncols;
     @autoreleasepool {
         GoldilocksMetalContext* impl = get_impl(ctx);
         id<MTLComputePipelineState> pso =
@@ -813,8 +824,9 @@ void metal_dispatch_ntt_rev_butterfly_s1(MetalCtxHandle ctx,
         [enc setComputePipelineState:pso];
         [enc setBuffer:(__bridge id<MTLBuffer>)(src) offset:0 atIndex:0];
         [enc setBuffer:(__bridge id<MTLBuffer>)(dst) offset:0 atIndex:1];
-        [enc setBytes:&domain_pow length:sizeof(uint32_t) atIndex:2];
-        [enc setBytes:&ncols      length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&domain_pow   length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&ncols        length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&ncols_stride length:sizeof(uint32_t) atIndex:4];
 
         NSUInteger tpg    = threadgroup_size_for(pso, 64);
         NSUInteger groups = ((NSUInteger)total + tpg - 1) / tpg;
@@ -838,8 +850,10 @@ void metal_dispatch_ntt_butterfly_all_phases(MetalCtxHandle ctx,
                                               uint32_t domain_size,
                                               uint32_t start_s,
                                               uint32_t domain_pow,
-                                              uint32_t s_global) {
+                                              uint32_t s_global,
+                                              uint32_t ncols_stride) {
     if (start_s > domain_pow) return;
+    if (ncols_stride == 0) ncols_stride = ncols;
     @autoreleasepool {
         GoldilocksMetalContext* impl = get_impl(ctx);
         id<MTLComputePipelineState> pso_r2 =
@@ -864,8 +878,9 @@ void metal_dispatch_ntt_butterfly_all_phases(MetalCtxHandle ctx,
 
         [enc setBuffer:(__bridge id<MTLBuffer>)(buf)      offset:0 atIndex:0];
         [enc setBuffer:(__bridge id<MTLBuffer>)(twiddles) offset:0 atIndex:1];
-        [enc setBytes:&ncols       length:sizeof(uint32_t) atIndex:2];
-        [enc setBytes:&domain_size length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&ncols        length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&domain_size  length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&ncols_stride length:sizeof(uint32_t) atIndex:6];
 
         NSUInteger tpg_r2 = threadgroup_size_for(pso_r2, 64);
         NSUInteger tpg_r4 = threadgroup_size_for(pso_r4, 64);
@@ -938,7 +953,9 @@ void metal_dispatch_ntt_butterfly_phase(MetalCtxHandle ctx,
                                          uint32_t ncols,
                                          uint32_t domain_size,
                                          uint32_t s,
-                                         uint32_t roots_stride_shift) {
+                                         uint32_t roots_stride_shift,
+                                         uint32_t ncols_stride) {
+    if (ncols_stride == 0) ncols_stride = ncols;
     @autoreleasepool {
         GoldilocksMetalContext* impl = get_impl(ctx);
         id<MTLComputePipelineState> pso =
@@ -958,6 +975,7 @@ void metal_dispatch_ntt_butterfly_phase(MetalCtxHandle ctx,
         [enc setBytes:&domain_size        length:sizeof(uint32_t) atIndex:3];
         [enc setBytes:&s                  length:sizeof(uint32_t) atIndex:4];
         [enc setBytes:&roots_stride_shift length:sizeof(uint32_t) atIndex:5];
+        [enc setBytes:&ncols_stride       length:sizeof(uint32_t) atIndex:6];
 
         NSUInteger tpg = threadgroup_size_for(pso, 64);
         NSUInteger groups = ((NSUInteger)total + tpg - 1) / tpg;
@@ -1006,7 +1024,9 @@ void metal_dispatch_intt_reorder_scale(MetalCtxHandle ctx,
                                         MetalBufHandle buf,
                                         uint32_t domain_size,
                                         uint32_t ncols,
-                                        uint64_t inv_n) {
+                                        uint64_t inv_n,
+                                        uint32_t ncols_stride) {
+    if (ncols_stride == 0) ncols_stride = ncols;
     @autoreleasepool {
         GoldilocksMetalContext* impl = get_impl(ctx);
         id<MTLComputePipelineState> pso =
@@ -1018,9 +1038,10 @@ void metal_dispatch_intt_reorder_scale(MetalCtxHandle ctx,
 
         [enc setComputePipelineState:pso];
         [enc setBuffer:(__bridge id<MTLBuffer>)(buf) offset:0 atIndex:0];
-        [enc setBytes:&domain_size length:sizeof(uint32_t) atIndex:1];
-        [enc setBytes:&ncols       length:sizeof(uint32_t) atIndex:2];
-        [enc setBytes:&inv_n       length:sizeof(uint64_t) atIndex:3];
+        [enc setBytes:&domain_size  length:sizeof(uint32_t) atIndex:1];
+        [enc setBytes:&ncols        length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&inv_n        length:sizeof(uint64_t) atIndex:3];
+        [enc setBytes:&ncols_stride length:sizeof(uint32_t) atIndex:4];
 
         // Dispatch (N/2 + 1) × ncols threads: one thread per (pair_key, col).
         // pair_idx == 0 is the fixed point at row 0; pair_idx in [1, N/2)
@@ -1040,7 +1061,9 @@ void metal_dispatch_intt_reorder_coset_scale(MetalCtxHandle ctx,
                                               MetalBufHandle buf,
                                               MetalBufHandle r_inv,
                                               uint32_t domain_size,
-                                              uint32_t ncols) {
+                                              uint32_t ncols,
+                                              uint32_t ncols_stride) {
+    if (ncols_stride == 0) ncols_stride = ncols;
     @autoreleasepool {
         GoldilocksMetalContext* impl = get_impl(ctx);
         id<MTLComputePipelineState> pso =
@@ -1053,8 +1076,9 @@ void metal_dispatch_intt_reorder_coset_scale(MetalCtxHandle ctx,
         [enc setComputePipelineState:pso];
         [enc setBuffer:(__bridge id<MTLBuffer>)(buf)   offset:0 atIndex:0];
         [enc setBuffer:(__bridge id<MTLBuffer>)(r_inv) offset:0 atIndex:1];
-        [enc setBytes:&domain_size length:sizeof(uint32_t) atIndex:2];
-        [enc setBytes:&ncols       length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&domain_size  length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&ncols        length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&ncols_stride length:sizeof(uint32_t) atIndex:4];
 
         NSUInteger threads = (NSUInteger)(domain_size / 2 + 1) * ncols;
         NSUInteger tpg     = threadgroup_size_for(pso, 64);

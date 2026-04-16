@@ -82,6 +82,16 @@
 
 namespace goldilocks_metal {
 
+// Forward declaration — NTT_Metal is now a thin wrapper around the
+// strided variant with ncols_stride == ncols (legacy whole-matrix path).
+void NTT_Metal_partial(Goldilocks::Element* dst,
+                       Goldilocks::Element* src,
+                       uint64_t size,
+                       uint64_t ncols_proc,
+                       uint64_t ncols_stride,
+                       NTT_Goldilocks* ntt_ctx,
+                       bool inverse);
+
 void NTT_Metal(Goldilocks::Element* dst,
                Goldilocks::Element* src,
                uint64_t size,
@@ -89,8 +99,24 @@ void NTT_Metal(Goldilocks::Element* dst,
                NTT_Goldilocks* ntt_ctx,
                bool inverse)
 {
+    NTT_Metal_partial(dst, src, size, ncols, ncols, ntt_ctx, inverse);
+}
+
+void NTT_Metal_partial(Goldilocks::Element* dst,
+                       Goldilocks::Element* src,
+                       uint64_t size,
+                       uint64_t ncols_proc,
+                       uint64_t ncols_stride,
+                       NTT_Goldilocks* ntt_ctx,
+                       bool inverse)
+{
     @autoreleasepool {
-        if (size == 0 || ncols == 0) return;
+        if (size == 0 || ncols_proc == 0) return;
+        if (ncols_stride == 0) ncols_stride = ncols_proc;
+        // Local rename so the rest of the function reads naturally — `ncols`
+        // here means "columns processed per row" (drives thread layout +
+        // dispatch counts), while `ncols_stride` drives buffer indexing.
+        const uint64_t ncols = ncols_proc;
 
         MetalCtxHandle ctx = metal_context_get();
 
@@ -106,9 +132,13 @@ void NTT_Metal(Goldilocks::Element* dst,
         uint64_t rlen = ntt_ctx->roots_len();  // = 1 << s_global
         (void)rlen;
 
-        size_t data_bytes = size * ncols * sizeof(Goldilocks::Element);
-        uint32_t ncols32  = (uint32_t)ncols;
-        uint32_t domain32 = (uint32_t)size;
+        // Buffer extent: address span the GPU touches across the slice.
+        // Last row is row=(size-1) at column ncols_stride*(size-1)+ncols-1.
+        // Plus 1 (zero-based → length). Bound by size*ncols_stride.
+        size_t data_bytes = (size_t)size * ncols_stride * sizeof(Goldilocks::Element);
+        uint32_t ncols32        = (uint32_t)ncols;
+        uint32_t ncols_stride32 = (uint32_t)ncols_stride;
+        uint32_t domain32       = (uint32_t)size;
 
         int dst_is_copy = 0;
         MetalBufHandle dst_buf = metal_buf_alias(ctx, (void*)dst, data_bytes, &dst_is_copy);
@@ -142,13 +172,15 @@ void NTT_Metal(Goldilocks::Element* dst,
 
             metal_dispatch_ntt_rev_butterfly_s1s2s3(
                 ctx, src_buf, dst_buf, domainPow, ncols32,
-                I_val, W8_val, W8c_val);
+                I_val, W8_val, W8c_val,
+                /*ncols_stride=*/ncols_stride32);
 
             // Continue from phase s=4.
             metal_dispatch_ntt_butterfly_all_phases(
                 ctx, dst_buf, tw_buf,
                 ncols32, domain32,
-                /*start_s=*/4, domainPow, s_global);
+                /*start_s=*/4, domainPow, s_global,
+                /*ncols_stride=*/ncols_stride32);
 
             metal_buf_release(src_buf);
         } else if (dst != src && domainPow == 2) {
@@ -158,11 +190,13 @@ void NTT_Metal(Goldilocks::Element* dst,
                                                       data_bytes, &src_is_copy);
             uint64_t I_val = roots_raw[1ULL << (s_global - 2)].fe;
             metal_dispatch_ntt_rev_butterfly_s1s2(
-                ctx, src_buf, dst_buf, domainPow, ncols32, I_val);
+                ctx, src_buf, dst_buf, domainPow, ncols32, I_val,
+                /*ncols_stride=*/ncols_stride32);
             metal_dispatch_ntt_butterfly_all_phases(
                 ctx, dst_buf, tw_buf,
                 ncols32, domain32,
-                /*start_s=*/3, domainPow, s_global);
+                /*start_s=*/3, domainPow, s_global,
+                /*ncols_stride=*/ncols_stride32);
             metal_buf_release(src_buf);
         } else if (dst != src && domainPow == 1) {
             // Fallback to s=1-only fused kernel for N=2.
@@ -170,7 +204,8 @@ void NTT_Metal(Goldilocks::Element* dst,
             MetalBufHandle src_buf = metal_buf_alias(ctx, (void*)src,
                                                       data_bytes, &src_is_copy);
             metal_dispatch_ntt_rev_butterfly_s1(
-                ctx, src_buf, dst_buf, domainPow, ncols32);
+                ctx, src_buf, dst_buf, domainPow, ncols32,
+                /*ncols_stride=*/ncols_stride32);
             metal_buf_release(src_buf);
         } else if (dst == src && domainPow >= 3) {
             // In-place fused-rev path via the persistent context scratch.
@@ -200,21 +235,25 @@ void NTT_Metal(Goldilocks::Element* dst,
 
             metal_dispatch_ntt_rev_butterfly_s1s2s3(
                 ctx, scratch_buf, dst_buf, domainPow, ncols32,
-                I_val, W8_val, W8c_val);
+                I_val, W8_val, W8c_val,
+                /*ncols_stride=*/ncols_stride32);
             metal_dispatch_ntt_butterfly_all_phases(
                 ctx, dst_buf, tw_buf,
                 ncols32, domain32,
-                /*start_s=*/4, domainPow, s_global);
+                /*start_s=*/4, domainPow, s_global,
+                /*ncols_stride=*/ncols_stride32);
             // Scratch is borrowed — do NOT release.
         } else {
             // Trivial fallback (domain_pow < 3 in-place; or sizes the
             // scratch can't satisfy). Use the legacy slow path.
             if (dst != src) std::memcpy(dst, src, data_bytes);
-            metal_dispatch_ntt_reverse_permutation(ctx, dst_buf, domainPow, ncols32);
+            metal_dispatch_ntt_reverse_permutation(ctx, dst_buf, domainPow, ncols32,
+                                                    /*ncols_stride=*/ncols_stride32);
             metal_dispatch_ntt_butterfly_all_phases(
                 ctx, dst_buf, tw_buf,
                 ncols32, domain32,
-                /*start_s=*/1, domainPow, s_global);
+                /*start_s=*/1, domainPow, s_global,
+                /*ncols_stride=*/ncols_stride32);
         }
 
         // -------------------------------------------------------------------
@@ -231,7 +270,8 @@ void NTT_Metal(Goldilocks::Element* dst,
             Goldilocks::Element inv_n = Goldilocks::inv(Goldilocks::fromU64(size));
             uint64_t inv_n_u64 = Goldilocks::toU64(inv_n);
             metal_dispatch_intt_reorder_scale(ctx, dst_buf,
-                                                domain32, ncols32, inv_n_u64);
+                                                domain32, ncols32, inv_n_u64,
+                                                /*ncols_stride=*/ncols_stride32);
         }
 
         // -------------------------------------------------------------------
@@ -337,10 +377,11 @@ void extendPol_Metal(Goldilocks::Element* output,
         MetalBufHandle tw_N = metal_twiddle_buffer(ctx, roots_N, rlen_N);
 
         metal_dispatch_ntt_reverse_permutation(
-            ctx, out_buf, domainPow_N, ncols32);
+            ctx, out_buf, domainPow_N, ncols32, /*ncols_stride=*/ncols32);
         metal_dispatch_ntt_butterfly_all_phases(
             ctx, out_buf, tw_N, ncols32, N32,
-            /*start_s=*/1, domainPow_N, s_global_N);
+            /*start_s=*/1, domainPow_N, s_global_N,
+            /*ncols_stride=*/ncols32);
 
         // GPU INTT and CPU memset must both finish before the forward
         // NTT begins (it reads the full N_Extended buffer including the
@@ -356,7 +397,7 @@ void extendPol_Metal(Goldilocks::Element* output,
             ctx, (void*)r_inv,
             N * sizeof(Goldilocks::Element), &r_is_copy);
         metal_dispatch_intt_reorder_coset_scale(
-            ctx, out_buf, r_buf, N32, ncols32);
+            ctx, out_buf, r_buf, N32, ncols32, /*ncols_stride=*/ncols32);
         metal_buf_release(r_buf);
 
         // Step 5: in-place forward NTT on the full extended domain.
@@ -373,10 +414,11 @@ void extendPol_Metal(Goldilocks::Element* output,
         // the bigger N_Extended buffer makes memcpy even more costly,
         // so the in-place dispatch wins.
         metal_dispatch_ntt_reverse_permutation(
-            ctx, out_buf, domainPow_Ext, ncols32);
+            ctx, out_buf, domainPow_Ext, ncols32, /*ncols_stride=*/ncols32);
         metal_dispatch_ntt_butterfly_all_phases(
             ctx, out_buf, tw_Ext, ncols32, NExt32,
-            /*start_s=*/1, domainPow_Ext, s_global_Ext);
+            /*start_s=*/1, domainPow_Ext, s_global_Ext,
+            /*ncols_stride=*/ncols32);
 
         // Readback if aliasing had to copy.
         if (out_is_copy) {

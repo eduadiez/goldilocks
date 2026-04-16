@@ -198,7 +198,8 @@ void metal_dispatch_merkle_parents_all_levels(MetalCtxHandle ctx,
 void metal_dispatch_ntt_reverse_permutation(MetalCtxHandle ctx,
                                              MetalBufHandle buf,
                                              uint32_t domainPow,
-                                             uint32_t ncols);
+                                             uint32_t ncols,
+                                             uint32_t ncols_stride);
 
 // ntt_rev_butterfly_s1: fused kernel that reads `src` in natural order and
 // writes `dst` = output of (reverse-permutation ∘ phase-1 butterfly).
@@ -208,7 +209,8 @@ void metal_dispatch_ntt_rev_butterfly_s1(MetalCtxHandle ctx,
                                           MetalBufHandle src,
                                           MetalBufHandle dst,
                                           uint32_t domain_pow,
-                                          uint32_t ncols);
+                                          uint32_t ncols,
+                                          uint32_t ncols_stride);
 
 // ntt_rev_butterfly_s1s2: fuses rev-perm + s=1 + s=2 butterflies into ONE
 // pass. Saves two full read+write passes vs the unfused trio. Requires
@@ -220,7 +222,8 @@ void metal_dispatch_ntt_rev_butterfly_s1s2(MetalCtxHandle ctx,
                                              MetalBufHandle dst,
                                              uint32_t domain_pow,
                                              uint32_t ncols,
-                                             uint64_t I_val);
+                                             uint64_t I_val,
+                                             uint32_t ncols_stride);
 
 // ntt_rev_butterfly_s1s2s3: fuses rev-perm + s=1 + s=2 + s=3 butterflies
 // into ONE pass. Saves THREE full read+write passes vs the unfused
@@ -236,7 +239,8 @@ void metal_dispatch_ntt_rev_butterfly_s1s2s3(MetalCtxHandle ctx,
                                               uint32_t ncols,
                                               uint64_t I_val,
                                               uint64_t W8_val,
-                                              uint64_t W8c_val);
+                                              uint64_t W8c_val,
+                                              uint32_t ncols_stride);
 
 // ntt_butterfly_phase: one thread per (butterfly pair, col) = domain_size/2 * ncols.
 //   buf                 = data buffer [domain_size * ncols]  (buffer(0))
@@ -249,13 +253,20 @@ void metal_dispatch_ntt_rev_butterfly_s1s2s3(MetalCtxHandle ctx,
 //   roots_stride_shift  = s_global - s                        (buffer(5) constant)
 //                         Kernel reads twiddles[j << roots_stride_shift]
 //                         to get root(s, j); matches CPU `root()` accessor.
+// `ncols_stride`: row stride in the buffer. When 0, defaults to `ncols`
+// (legacy behavior). When > ncols, kernel processes a contiguous slice
+// of `ncols` columns out of a wider matrix with row stride `ncols_stride`.
+// Caller offsets `buf` by col_offset × sizeof(Element) to address any
+// starting column. See ntt.metal::ntt_butterfly_phase for full
+// semantics. Same convention applies to every NTT kernel below.
 void metal_dispatch_ntt_butterfly_phase(MetalCtxHandle ctx,
                                          MetalBufHandle buf,
                                          MetalBufHandle twiddles,
                                          uint32_t ncols,
                                          uint32_t domain_size,
                                          uint32_t s,
-                                         uint32_t roots_stride_shift);
+                                         uint32_t roots_stride_shift,
+                                         uint32_t ncols_stride);
 
 // Batched variant: encode phases s = start_s..domain_pow in one command
 // buffer with a single waitUntilCompleted. Pass start_s=1 for a full NTT,
@@ -268,7 +279,8 @@ void metal_dispatch_ntt_butterfly_all_phases(MetalCtxHandle ctx,
                                               uint32_t domain_size,
                                               uint32_t start_s,
                                               uint32_t domain_pow,
-                                              uint32_t s_global);
+                                              uint32_t s_global,
+                                              uint32_t ncols_stride);
 
 // intt_reorder: inverse-NTT index permutation out[(N-i) % N] = in[i], in-place.
 //   buf          = data buffer  (buffer(0))
@@ -287,7 +299,8 @@ void metal_dispatch_intt_reorder_scale(MetalCtxHandle ctx,
                                         MetalBufHandle buf,
                                         uint32_t domain_size,
                                         uint32_t ncols,
-                                        uint64_t inv_n);
+                                        uint64_t inv_n,
+                                        uint32_t ncols_stride);
 
 // intt_reorder_coset_scale: variant of intt_reorder_scale that applies a
 // PER-ELEMENT coset multiplier r_inv[dsty] instead of the scalar 1/N. This
@@ -299,7 +312,8 @@ void metal_dispatch_intt_reorder_coset_scale(MetalCtxHandle ctx,
                                               MetalBufHandle buf,
                                               MetalBufHandle r_inv,
                                               uint32_t domain_size,
-                                              uint32_t ncols);
+                                              uint32_t ncols,
+                                              uint32_t ncols_stride);
 
 // intt_scale: one thread per flat element [0, domain_size * ncols).
 //   buf    = data buffer  (buffer(0))
