@@ -72,6 +72,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <thread>
 #include <vector>
 
 #include "../goldilocks_base_field.hpp"
@@ -173,6 +174,16 @@ void NTT_Metal(Goldilocks::Element* dst,
             metal_buf_release(src_buf);
         } else {
             // In-place path (src == dst) or trivial N=1.
+            //
+            // We tried gating in-place at small sizes through a fused-rev
+            // path with an internal scratch (`metal_buf_alloc` + memcpy),
+            // expecting that the 2-3 saved NTT passes would outweigh the
+            // alloc+copy. Measured: scratch overhead (~1.5 ms at 32 MB,
+            // dominated by Metal's `newBuffer` / page-mmap cost) always
+            // canceled the win at every shape we tested. Reverted.
+            // A persistent context-side scratch pool would amortize the
+            // alloc cost; revisit if a high-frequency in-place INTT
+            // caller emerges.
             if (dst != src) std::memcpy(dst, src, data_bytes);
             metal_dispatch_ntt_reverse_permutation(ctx, dst_buf, domainPow, ncols32);
             metal_dispatch_ntt_butterfly_all_phases(
@@ -255,17 +266,31 @@ void extendPol_Metal(Goldilocks::Element* output,
         uint32_t N32     = (uint32_t)N;
         uint32_t NExt32  = (uint32_t)N_Extended;
 
-        // Step 1 & 2: stage output = [input | zeros]
+        // Step 1: stage output[0..N*ncols] = input. Always sequential
+        // because the INTT below depends on it.
         std::memcpy(output, input,
                     N * ncols * sizeof(Goldilocks::Element));
-        std::memset(output + N * ncols, 0,
-                    (N_Extended - N) * ncols * sizeof(Goldilocks::Element));
 
         // Alias the full N_Extended × ncols buffer for all GPU work.
         size_t bytes_ext = N_Extended * ncols * sizeof(Goldilocks::Element);
         int out_is_copy = 0;
         MetalBufHandle out_buf = metal_buf_alias(
             ctx, (void*)output, bytes_ext, &out_is_copy);
+
+        // Step 2 + 3 — run concurrently:
+        //   CPU: memset output[N*ncols..N_Extended*ncols] = 0 (~80 ms at
+        //        LDE_BENCH scale)
+        //   GPU: in-place INTT butterflies on output[0..N*ncols]
+        //
+        // The two engines touch DISJOINT regions of the unified-memory
+        // buffer (CPU upper half, GPU lower half), so there is no
+        // coherency issue. The CPU memset returns its core to idle while
+        // the GPU runs the much-longer INTT phase loop, hiding the
+        // memset cost entirely on production-scale workloads.
+        std::thread memset_thread([&]{
+            std::memset(output + N * ncols, 0,
+                        (N_Extended - N) * ncols * sizeof(Goldilocks::Element));
+        });
 
         // Step 3: in-place INTT butterflies on the first N rows.
         //   INTT = (forward NTT butterflies) + (reorder + scale) — here we
@@ -282,6 +307,13 @@ void extendPol_Metal(Goldilocks::Element* output,
         metal_dispatch_ntt_butterfly_all_phases(
             ctx, out_buf, tw_N, ncols32, N32,
             /*start_s=*/1, domainPow_N, s_global_N);
+
+        // GPU INTT and CPU memset must both finish before the forward
+        // NTT begins (it reads the full N_Extended buffer including the
+        // upper zeros). The GPU dispatch helpers above already block on
+        // waitUntilCompleted; join the memset thread now so the upper
+        // half is committed before step 5.
+        memset_thread.join();
 
         // Step 4: coset reorder+scale using r_[] = shift^i / N.
         //   r_inv points to ntt_ctx->r_, which is length N.
