@@ -569,6 +569,54 @@ kernel void intt_reorder_scale(
     buf[hi_idx] = gl_canonicalize(gl_mul(a, inv_n));
 }
 
+// ---- kernel: intt_reorder_coset_scale -------------------------------------
+// Same as intt_reorder_scale but applies a PER-ELEMENT coset multiplier
+// r_inv[dsty] (where dsty = intt_idx(src_idx, N) = (N - src_idx) % N) instead
+// of the scalar 1/N. This is the LDE-side variant that fuses the reorder
+// step with the coset shift that `extendPol` applies via the CPU's
+// `extend=true` path (ntt_goldilocks.cpp:171-182).
+//
+// Table `r_inv` MUST be exactly N ulongs long, with r_inv[i] = shift^i / N
+// matching NTT_Goldilocks::computeR (ntt_goldilocks.hpp:153-165).
+//
+// Dispatch: (N/2 + 1) × ncols threads (same as intt_reorder_scale).
+kernel void intt_reorder_coset_scale(
+    device ulong*            buf           [[ buffer(0) ]],
+    device const ulong*      r_inv         [[ buffer(1) ]],
+    constant uint&           domain_size   [[ buffer(2) ]],
+    constant uint&           ncols         [[ buffer(3) ]],
+    uint tid [[ thread_position_in_grid ]]
+) {
+    uint pair_idx = tid / ncols;
+    uint col      = tid % ncols;
+
+    uint N  = domain_size;
+    uint hi = N - pair_idx;
+
+    if (pair_idx == 0) {
+        uint idx = col;
+        buf[idx] = gl_canonicalize(gl_mul(buf[idx], r_inv[0]));
+        return;
+    }
+    if (pair_idx >= hi) {
+        if (pair_idx == hi) {
+            uint idx = pair_idx * ncols + col;
+            buf[idx] = gl_canonicalize(gl_mul(buf[idx], r_inv[pair_idx]));
+        }
+        return;
+    }
+
+    // Pair (pair_idx, hi): read both, swap with per-destination coset scale.
+    //   output[pair_idx] = input[hi]       * r_inv[pair_idx]
+    //   output[hi]       = input[pair_idx] * r_inv[hi]
+    uint lo_idx = pair_idx * ncols + col;
+    uint hi_idx = hi       * ncols + col;
+    ulong a = buf[lo_idx];
+    ulong b = buf[hi_idx];
+    buf[lo_idx] = gl_canonicalize(gl_mul(b, r_inv[pair_idx]));
+    buf[hi_idx] = gl_canonicalize(gl_mul(a, r_inv[hi]));
+}
+
 // ---- kernel: intt_reorder --------------------------------------------------
 // Inverse-NTT index permutation: out[(N - i) % N] = in[i].
 // CPU reference: NTT_iters uses intt_idx(i,N) = (N - i) % N before INTT scale

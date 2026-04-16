@@ -94,6 +94,15 @@ bench_ntt: bench_ntt.mm $(METAL_BRIDGE_SRCS) $(GL_SRC)/metal/ntt_metal.mm
 	    bench_ntt.mm $(METAL_BRIDGE_SRCS) $(GL_SRC)/metal/ntt_metal.mm \
 	    $(NTT_CPU_OBJ) $(GL_LIBS) -o $@
 
+# LDE (extendPol) correctness + perf: CPU vs Metal on Fibonacci-seeded input.
+bench_lde: bench_lde.mm $(METAL_BRIDGE_SRCS) $(GL_SRC)/metal/ntt_metal.mm
+	$(CXX) -std=c++17 -O3 -fobjc-arc -ObjC++ $(MTL_FRAMEWORKS) \
+	    $(GL_INC) $(OMP_FLAGS) \
+	    -DGOLDILOCKS_HAS_METAL \
+	    -DMTL_KERNEL_DIR=\"$(MTL_KERNEL_DIR)\" \
+	    bench_lde.mm $(METAL_BRIDGE_SRCS) $(GL_SRC)/metal/ntt_metal.mm \
+	    $(NTT_CPU_OBJ) $(GL_LIBS) -o $@
+
 # Leaf-kernel-only timing to separate GPU execution from host overhead.
 probe_kernel_gpu_time: probe_kernel_gpu_time.mm $(METAL_BRIDGE_SRCS)
 	$(CXX) -std=c++17 -O3 -fobjc-arc -ObjC++ $(MTL_FRAMEWORKS) \

@@ -978,6 +978,37 @@ void metal_dispatch_intt_reorder_scale(MetalCtxHandle ctx,
     }
 }
 
+void metal_dispatch_intt_reorder_coset_scale(MetalCtxHandle ctx,
+                                              MetalBufHandle buf,
+                                              MetalBufHandle r_inv,
+                                              uint32_t domain_size,
+                                              uint32_t ncols) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        id<MTLComputePipelineState> pso =
+            (__bridge id<MTLComputePipelineState>)(
+                metal_context_pipeline(ctx, "intt_reorder_coset_scale"));
+
+        id<MTLCommandBuffer>        cmd = [impl->_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(buf)   offset:0 atIndex:0];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(r_inv) offset:0 atIndex:1];
+        [enc setBytes:&domain_size length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&ncols       length:sizeof(uint32_t) atIndex:3];
+
+        NSUInteger threads = (NSUInteger)(domain_size / 2 + 1) * ncols;
+        NSUInteger tpg     = threadgroup_size_for(pso, 64);
+        NSUInteger groups  = (threads + tpg - 1) / tpg;
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+}
+
 void metal_dispatch_intt_scale(MetalCtxHandle ctx,
                                 MetalBufHandle buf,
                                 uint64_t inv_n,

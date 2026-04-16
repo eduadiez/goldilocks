@@ -289,6 +289,18 @@ void metal_dispatch_intt_reorder_scale(MetalCtxHandle ctx,
                                         uint32_t ncols,
                                         uint64_t inv_n);
 
+// intt_reorder_coset_scale: variant of intt_reorder_scale that applies a
+// PER-ELEMENT coset multiplier r_inv[dsty] instead of the scalar 1/N. This
+// is the fused reorder+coset-shift step at the tail of an LDE INTT.
+//
+// `r_inv` MUST point to a buffer of at least `domain_size` ulongs matching
+// NTT_Goldilocks::r_ (shift^i / N, computed by `computeR`).
+void metal_dispatch_intt_reorder_coset_scale(MetalCtxHandle ctx,
+                                              MetalBufHandle buf,
+                                              MetalBufHandle r_inv,
+                                              uint32_t domain_size,
+                                              uint32_t ncols);
+
 // intt_scale: one thread per flat element [0, domain_size * ncols).
 //   buf    = data buffer  (buffer(0))
 //   inv_n  = 1/domain_size mod p  (buffer(1) constant ulong)

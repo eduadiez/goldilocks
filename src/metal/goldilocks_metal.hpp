@@ -16,6 +16,22 @@ namespace goldilocks_metal {
     void NTT_Metal(Goldilocks::Element* dst, Goldilocks::Element* src,
                    uint64_t size, uint64_t ncols, NTT_Goldilocks* ntt_ctx, bool inverse);
 
+    // Low-Degree Extension. Mirrors NTT_Goldilocks::extendPol semantics:
+    //   1. Copy `input` (N × ncols) into the first N×ncols of `output`.
+    //   2. INTT butterflies on that region; apply coset reorder+scale using
+    //      r_[] (computed per NTT_Goldilocks::computeR on the caller's ctx).
+    //   3. Zero the tail [N×ncols, N_Extended×ncols).
+    //   4. Forward NTT on the full N_Extended × ncols buffer.
+    // `ntt_ctx` must be sized for N (caller calls `computeR(N)` if needed).
+    // `r_inv` points to ntt_ctx->r_ (shift^i / N, length N).
+    void extendPol_Metal(Goldilocks::Element* output,
+                         Goldilocks::Element* input,
+                         uint64_t N_Extended,
+                         uint64_t N,
+                         uint64_t ncols,
+                         NTT_Goldilocks* ntt_ctx,
+                         Goldilocks::Element* r_inv);
+
     // Allocate an array of `n` Goldilocks::Element on a 16KB-page-aligned
     // boundary. Buffers passed to merkletree_metal/NTT_Metal that come from
     // this allocator hit the `newBufferWithBytesNoCopy` zero-copy path inside

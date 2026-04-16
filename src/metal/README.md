@@ -242,6 +242,29 @@ shapes:
 The win is shape-dependent (largest at small-ncols) but never negative —
 callers who can spare a scratch buffer should always pass distinct pointers.
 
+### `NTT_Goldilocks::extendPol_Metal`
+```cpp
+void extendPol_Metal(
+    Goldilocks::Element* output,
+    Goldilocks::Element* input,
+    uint64_t N_Extended,
+    uint64_t N,
+    uint64_t ncols);
+```
+Low-Degree Extension on the GPU. Mirrors `extendPol` semantics:
+`INTT(input, N, ncols)` with coset shift → zero-pad to `N_Extended` →
+forward `NTT(output, N_Extended, ncols)`. The coset reorder+scale uses
+a dedicated `intt_reorder_coset_scale` kernel that fuses the index
+permutation with the per-element `r_[i] = shift^i / N` multiplication.
+
+Calls `computeR(N)` on the caller instance the first time through so
+`r_[]` is populated. `N_Extended` must be a power of two ≥ `N`; both
+`N` and `N_Extended` must be ≥ 2. Does NOT require `NTT_Metal` to have
+run previously.
+
+Bit-exact with CPU `extendPol` on every shape measured. See
+`benchs/metal_probes/bench_lde.mm` for validation and timings.
+
 ### `goldilocks_metal::allocate_aligned_elements`
 ```cpp
 Goldilocks::Element* allocate_aligned_elements(uint64_t n);

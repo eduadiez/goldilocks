@@ -198,6 +198,18 @@ public:
 #ifdef GOLDILOCKS_HAS_METAL
     void NTT_Metal(Goldilocks::Element* dst, Goldilocks::Element* src,
                    uint64_t size, uint64_t ncols, bool inverse=false);
+
+    // Metal-accelerated Low-Degree Extension. Mirrors `extendPol` semantics:
+    //   INTT(input of size N×ncols, with coset shift) →
+    //   zero-extend to N_Extended →
+    //   forward NTT on N_Extended×ncols.
+    // Allocates the internal extended-domain roots the first time through;
+    // ensures `computeR(N)` has run so `r_` is populated.
+    void extendPol_Metal(Goldilocks::Element* output,
+                         Goldilocks::Element* input,
+                         uint64_t N_Extended,
+                         uint64_t N,
+                         uint64_t ncols);
 #endif
 };
 

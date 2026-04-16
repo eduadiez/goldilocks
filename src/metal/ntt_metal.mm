@@ -210,6 +210,114 @@ void NTT_Metal(Goldilocks::Element* dst,
     }  // @autoreleasepool
 }
 
+// ---------------------------------------------------------------------------
+// extendPol_Metal — Low-Degree Extension on the GPU.
+//
+// Pipeline (mirrors NTT_Goldilocks::extendPol):
+//   1. memcpy input (N × ncols) into the first N×ncols of `output`.
+//   2. memset the tail [N×ncols, N_Extended×ncols) of `output` to zero.
+//   3. In-place INTT butterflies on the first N×ncols (domain_size = N).
+//   4. Coset reorder+scale: intt_reorder_coset_scale(buf, r_inv, N, ncols).
+//      After this step the first N×ncols of output holds the CPU extendPol
+//      intermediate (INTT-with-coset), and the tail is still zero.
+//   5. In-place forward NTT on the full N_Extended × ncols buffer.
+//
+// The INTT step runs with `src == dst` (both the user's output buffer) so
+// the legacy in-place path is used. The subsequent forward NTT is also
+// in-place, same reason. Using the fused rev+s1+s2+s3 kernel would require
+// an N_Extended × ncols scratch buffer, which doubles memory use at the
+// 2²³ × 100 benchmark scale — not worth the ~15% speedup.
+//
+// Twiddles for the N-sized INTT come from ntt_ctx (already sized for N).
+// Twiddles for the N_Extended NTT come from a second NTT_Goldilocks instance
+// allocated here; this matches how CPU extendPol builds its
+// ntt_extension context on the fly.
+//
+// Bit-exact vs CPU reference for every shape measured (see bench_lde.mm).
+void extendPol_Metal(Goldilocks::Element* output,
+                     Goldilocks::Element* input,
+                     uint64_t N_Extended,
+                     uint64_t N,
+                     uint64_t ncols,
+                     NTT_Goldilocks* ntt_ctx,
+                     Goldilocks::Element* r_inv) {
+    @autoreleasepool {
+        if (N_Extended == 0 || N == 0 || ncols == 0) return;
+
+        MetalCtxHandle ctx = metal_context_get();
+
+        uint32_t domainPow_N = 0;
+        { uint64_t s = N; while (s > 1) { s >>= 1; domainPow_N++; } }
+        uint32_t domainPow_Ext = 0;
+        { uint64_t s = N_Extended; while (s > 1) { s >>= 1; domainPow_Ext++; } }
+
+        uint32_t ncols32 = (uint32_t)ncols;
+        uint32_t N32     = (uint32_t)N;
+        uint32_t NExt32  = (uint32_t)N_Extended;
+
+        // Step 1 & 2: stage output = [input | zeros]
+        std::memcpy(output, input,
+                    N * ncols * sizeof(Goldilocks::Element));
+        std::memset(output + N * ncols, 0,
+                    (N_Extended - N) * ncols * sizeof(Goldilocks::Element));
+
+        // Alias the full N_Extended × ncols buffer for all GPU work.
+        size_t bytes_ext = N_Extended * ncols * sizeof(Goldilocks::Element);
+        int out_is_copy = 0;
+        MetalBufHandle out_buf = metal_buf_alias(
+            ctx, (void*)output, bytes_ext, &out_is_copy);
+
+        // Step 3: in-place INTT butterflies on the first N rows.
+        //   INTT = (forward NTT butterflies) + (reorder + scale) — here we
+        //   run the butterflies then replace the reorder+scale with the
+        //   coset variant.
+        uint32_t s_global_N = ntt_ctx->get_s();
+        const uint64_t* roots_N = reinterpret_cast<const uint64_t*>(
+            ntt_ctx->roots_ptr());
+        uint64_t rlen_N = ntt_ctx->roots_len();
+        MetalBufHandle tw_N = metal_twiddle_buffer(ctx, roots_N, rlen_N);
+
+        metal_dispatch_ntt_reverse_permutation(
+            ctx, out_buf, domainPow_N, ncols32);
+        metal_dispatch_ntt_butterfly_all_phases(
+            ctx, out_buf, tw_N, ncols32, N32,
+            /*start_s=*/1, domainPow_N, s_global_N);
+
+        // Step 4: coset reorder+scale using r_[] = shift^i / N.
+        //   r_inv points to ntt_ctx->r_, which is length N.
+        int r_is_copy = 0;
+        MetalBufHandle r_buf = metal_buf_alias(
+            ctx, (void*)r_inv,
+            N * sizeof(Goldilocks::Element), &r_is_copy);
+        metal_dispatch_intt_reorder_coset_scale(
+            ctx, out_buf, r_buf, N32, ncols32);
+        metal_buf_release(r_buf);
+
+        // Step 5: in-place forward NTT on the full extended domain.
+        //   Need roots for the extended size. Build a second NTT context.
+        //   (Matches CPU extendPol at ntt_goldilocks.cpp:375.)
+        NTT_Goldilocks ntt_extension(N_Extended, 1, N_Extended / N);
+        uint32_t s_global_Ext = ntt_extension.get_s();
+        const uint64_t* roots_Ext = reinterpret_cast<const uint64_t*>(
+            ntt_extension.roots_ptr());
+        uint64_t rlen_Ext = ntt_extension.roots_len();
+        MetalBufHandle tw_Ext = metal_twiddle_buffer(ctx, roots_Ext, rlen_Ext);
+
+        metal_dispatch_ntt_reverse_permutation(
+            ctx, out_buf, domainPow_Ext, ncols32);
+        metal_dispatch_ntt_butterfly_all_phases(
+            ctx, out_buf, tw_Ext, ncols32, NExt32,
+            /*start_s=*/1, domainPow_Ext, s_global_Ext);
+
+        // Readback if aliasing had to copy.
+        if (out_is_copy) {
+            void* gpu_ptr = metal_buf_contents(out_buf);
+            std::memcpy(output, gpu_ptr, bytes_ext);
+        }
+        metal_buf_release(out_buf);
+    }  // @autoreleasepool
+}
+
 }  // namespace goldilocks_metal
 
 #endif // GOLDILOCKS_HAS_METAL

@@ -404,4 +404,16 @@ void NTT_Goldilocks::NTT_Metal(Goldilocks::Element* dst, Goldilocks::Element* sr
                                uint64_t size, uint64_t ncols, bool inverse) {
     goldilocks_metal::NTT_Metal(dst, src, size, ncols, this, inverse);
 }
+
+void NTT_Goldilocks::extendPol_Metal(Goldilocks::Element* output,
+                                      Goldilocks::Element* input,
+                                      uint64_t N_Extended,
+                                      uint64_t N,
+                                      uint64_t ncols) {
+    if (r == NULL) {
+        computeR((int)N);
+    }
+    goldilocks_metal::extendPol_Metal(output, input, N_Extended, N, ncols,
+                                        this, r_);
+}
 #endif

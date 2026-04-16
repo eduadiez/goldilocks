@@ -165,6 +165,43 @@ TEST(GOLDILOCKS_TEST, NTT_Metal_roundtrip)
 }
 
 // ============================================================================
+// TEST: extendPol_Metal
+// ============================================================================
+// Verifies that NTT_Goldilocks::extendPol_Metal produces bit-exact output
+// against the reference NTT_Goldilocks::extendPol on a small Fibonacci-seeded
+// input. Covers the full LDE pipeline: INTT-with-coset, zero-extension,
+// forward NTT on the extended domain.
+TEST(GOLDILOCKS_TEST, extendPol_Metal)
+{
+    const uint64_t N       = 1ULL << 10;   // 1024
+    const uint64_t N_Ext   = 1ULL << 11;   // 2048 (blowup = 2)
+    const uint64_t ncols   = 4;
+
+    std::vector<Goldilocks::Element> input(N * ncols);
+    std::vector<Goldilocks::Element> cpu_out(N_Ext * ncols);
+    std::vector<Goldilocks::Element> gpu_out(N_Ext * ncols);
+    std::vector<Goldilocks::Element> cpu_buf(N_Ext * ncols);
+
+    // Fibonacci seed per column.
+    for (uint64_t c = 0; c < ncols; c++)
+        input[c] = input[ncols + c] = Goldilocks::one();
+    for (uint64_t i = 2; i < N; i++) {
+        for (uint64_t c = 0; c < ncols; c++) {
+            input[i * ncols + c] = input[(i - 1) * ncols + c] + input[(i - 2) * ncols + c];
+        }
+    }
+
+    NTT_Goldilocks ntt(N);
+    ntt.extendPol(cpu_out.data(), input.data(), N_Ext, N, ncols, cpu_buf.data());
+    ntt.extendPol_Metal(gpu_out.data(), input.data(), N_Ext, N, ncols);
+
+    for (uint64_t i = 0; i < N_Ext * ncols; i++) {
+        ASSERT_EQ(Goldilocks::toU64(gpu_out[i]), Goldilocks::toU64(cpu_out[i]))
+            << "Mismatch at index " << i;
+    }
+}
+
+// ============================================================================
 // Environment: explicit Metal library load before any test runs.
 //
 // `newDefaultLibrary` in metal_context.mm expects a sibling `default.metallib`

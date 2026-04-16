@@ -31,7 +31,7 @@ All throughput numbers in MiB/s (higher is better); NTT/LDE in seconds
 | MERKLETREE_BATCH_BENCH | 162.7 (AVX2)       | 252  | ≈ 1440 §  | ≈ 8.85× | ≈ 5.71× |
 | **NTT_BENCH**          | **34.4 s (scalar)** | **7.23 s** | **0.60 s** ¶    | **57.3×** | **12.0×** |
 | NTT_BLOCK_BENCH        | 8.74 s (scalar)    | 2.12 s | not implemented | — | — |
-| LDE_BENCH              | 71.3 s (scalar)    | 15.2 s | not implemented | — | — |
+| **LDE_BENCH**          | **71.3 s (scalar)**| **15.2 s** | **2.52 s** ※   | **28.3×** | **6.03×** |
 | LDE_BLOCK_BENCH        | 29.1 s (scalar)    | 10.2 s | not implemented | — | — |
 
 † Metal has no standalone Poseidon/linear-hash probe; the permutation is
@@ -51,6 +51,14 @@ sequential Metal's ≈ 1440 MiB/s forward.
 the Xeon column is scalar-only. The codebase's NEON NTT on M4 Pro is
 7.23 s on the same shape. Metal delivers **57× over Xeon scalar and
 12× over M4 NEON** on this workload.
+
+※ LDE_BENCH shape (N = 2²³ → 2²⁴ × 100 cols, 12.5 GiB output): Metal
+**2.52 s** via `NTT_Goldilocks::extendPol_Metal` (bit-exact vs CPU
+`extendPol` on every shape measured). The pipeline runs INTT +
+coset reorder+scale + zero-extension + forward NTT on the extended
+domain, all in one GPU call. There is no AVX2 LDE in the codebase —
+the Xeon column is scalar-only. Metal delivers **28× over Xeon scalar
+and 6× over M4 NEON** at this shape; see §3b for the full shape sweep.
 
 **Takeaway:** Metal on M4 Pro is 5-60× faster than Xeon D-2141I across
 the Poseidon/Merkle/NTT workload surface (where implemented). The win
@@ -147,6 +155,42 @@ the same algorithm.
 
 ---
 
+## 3b. LDE — `bench_lde` measured shapes
+
+From `benchs/metal_probes/bench_lde`. Metal runs
+`NTT_Goldilocks::extendPol_Metal` (INTT with coset shift → zero-pad →
+forward NTT, all in one GPU call); CPU runs the reference
+`NTT_Goldilocks::extendPol` using the NEON NTT fast path internally.
+
+| N → N_Ext | ncols | CPU (NEON) | **Metal** | Metal/CPU | Bit-exact |
+|---|---:|---:|---:|---:|:---:|
+| 2¹⁴ → 2¹⁵   | 8   | 1.19 ms     | 1.97 ms    | 0.60× (launch-bound) | ✓ |
+| 2¹⁶ → 2¹⁷   | 16  | 6.35 ms     | 3.58 ms    | **1.77×** | ✓ |
+| 2¹⁸ → 2¹⁹   | 64  | 81.1 ms     | **35.6 ms** | **2.28×** | ✓ |
+| 2¹⁸ → 2¹⁹   | 128 | 144.8 ms    | **69.2 ms** | **2.09×** | ✓ |
+| 2²⁰ → 2²¹   | 32  | 191.6 ms    | **77.1 ms** | **2.48×** | ✓ |
+| **2²³ → 2²⁴** (LDE_BENCH) | **100** | **7541.8 ms** | **2519.8 ms** | **2.99×** | ✓ |
+
+All paths bit-exact vs CPU reference via `memcmp` at every shape.
+Metal crosses over ~2¹⁶ rows × 16 cols; below that, dispatch overhead
+dominates. Above 2¹⁸ rows, the GPU settles at a consistent 2-3× win.
+
+Implementation notes (`src/metal/ntt_metal.mm::extendPol_Metal`):
+- INTT step uses the in-place path (butterflies → coset reorder+scale)
+  on the first N×ncols region of the output buffer.
+- Coset reorder+scale is a new kernel `intt_reorder_coset_scale`
+  (replaces the `1/N` scalar in the regular INTT tail with a per-element
+  `r_[i] = shift^i / N` multiply, read from a Metal buffer aliased to
+  `ntt_ctx->r_`).
+- Zero-extension is a plain `memset` on the output buffer tail
+  (positions [N×ncols, N_Extended×ncols)) before the forward NTT.
+- Forward NTT runs in-place on the full N_Extended domain. Using the
+  fused rev+s1+s2+s3 path would need an N_Extended×ncols scratch
+  buffer; at LDE_BENCH scale that's +12.5 GiB — not worth the ~15%
+  speedup.
+
+---
+
 ## 4. Poseidon permutation (`POSEIDON_BENCH_FULL`, `POSEIDON_BENCH`)
 
 From `make benchcpu` on Apple M4 Pro (14 threads) and
@@ -175,28 +219,21 @@ GPU overhead eating some of the scaling).
 
 ---
 
-## 5. NTT_BLOCK / LDE / LDE_BLOCK
+## 5. NTT_BLOCK / LDE_BLOCK
 
-The Metal backend does NOT implement `NTT_Block` or `extendPol` (coset
-LDE). The existing scalar and NEON implementations remain the only
-path for these. For completeness, CPU-only numbers:
+The Metal backend now implements `extendPol_Metal` (see §3b above).
+`NTT_Block` and `LDE_BLOCK_BENCH` are not yet Metal-backed. For
+completeness, CPU-only numbers on those:
 
 | Benchmark | M4 Pro 14 threads | Xeon 16 threads |
 |---|---:|---:|
 | NTT_BLOCK_BENCH (scalar) | 1.93 s | 8.74 s |
-| LDE_BENCH (scalar) | 13.9 s | 71.3 s |
 | LDE_BLOCK_BENCH (scalar) | 6.09 s | 29.1 s |
 
 There are no `_AVX` or `_NEON` variants of these benchmarks. M4 Pro
 scalar beats Xeon scalar by 2.1-4.5× on these — larger wins than the
 Poseidon benchmarks because NTT/LDE are cache- and memory-bandwidth-bound
 where M4 Pro's unified memory hierarchy dominates.
-
-**Metal implementation potential**: adding an `extendPol_Metal` would be
-natural follow-up work. The MSL NTT kernels already in place would cover
-most of the pipeline; only the coset pre-multiplication (shift table
-`r[]`, `r_[]` computed by `NTT_Goldilocks::computeR`) and the
-zero-extension need to be plumbed through the Metal bridge.
 
 ---
 
@@ -218,8 +255,8 @@ Measured on Xeon D-2141I (8-physical-core, 2018 server chip):
 |---|---:|---:|---:|
 | MERKLETREE_BENCH | 44.95 s | **5.64 s** | **7.97×** |
 | POSEIDON_BENCH_FULL | 2.49 µs/hash | ~0.46 µs/hash * | ~5.4× |
-| NTT_BENCH | n/a (scalar 34.4 s) | ~3 s ** | n/a |
-| LDE_BENCH | n/a (scalar 71.3 s) | n/a (not implemented) | — |
+| NTT_BENCH | n/a (scalar 34.4 s) | **0.60 s** | **57× (vs scalar)** |
+| LDE_BENCH | n/a (scalar 71.3 s) | **2.52 s** | **28× (vs scalar)** |
 
 *Derived, see §4. **Extrapolated from bench_ntt results.
 
@@ -264,6 +301,7 @@ measurements.
 | — (this session) | `ntt_rev_butterfly_s1s2s3` (rev + 3 stages) | — | **2.86×** |
 | — (this session) | `intt_reorder_scale` one-thread-per-(row,col) | — | — |
 | — (this session) | `bench_merkle` programmatic `MTLCaptureManager` (`MTL_CAPTURE_ENABLED=1`) | — | — |
+| — (this session) | **`extendPol_Metal`** (INTT + coset reorder+scale + zero-pad + NTT) | — | — |
 
 Also kept in-tree as selectable variants (measured, did NOT improve the
 default path):
@@ -289,7 +327,12 @@ make bench_merkle
 make bench_ntt
 ./bench_ntt
 
-# 4. Sequential vs batched Merkle
+# 4. Benchmark LDE (extendPol)
+make bench_lde
+./bench_lde
+./bench_lde --big            # 2^23 → 2^24, 100 cols (~31 GB RAM pressure)
+
+# 5. Sequential vs batched Merkle
 make bench_merkle_batch
 ./bench_merkle_batch
 
@@ -314,9 +357,11 @@ make benchcpu
 ```
 make runtestmetal
 # [ RUN      ] GOLDILOCKS_TEST.merkletree_metal
-# [       OK ] GOLDILOCKS_TEST.merkletree_metal (38 ms)
+# [       OK ] GOLDILOCKS_TEST.merkletree_metal (36 ms)
 # [ RUN      ] GOLDILOCKS_TEST.NTT_Metal_roundtrip
-# [       OK ] GOLDILOCKS_TEST.NTT_Metal_roundtrip (39 ms)
+# [       OK ] GOLDILOCKS_TEST.NTT_Metal_roundtrip (77 ms)
+# [ RUN      ] GOLDILOCKS_TEST.extendPol_Metal
+# [       OK ] GOLDILOCKS_TEST.extendPol_Metal (10 ms)
 ```
 
 Both tests use the Fibonacci-input oracle from `tests/tests.cpp:2232-2235`:
