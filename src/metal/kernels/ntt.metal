@@ -149,19 +149,77 @@ kernel void ntt_rev_butterfly_s1(
     uint pair_idx = tid / ncols;
     uint col      = tid % ncols;
 
-    // After bit-reversal, the butterfly pair at natural positions
-    // (2*pair_idx, 2*pair_idx+1) comes from src positions
-    //   reverse_bits(2*pair_idx)   >> (32 - domain_pow)
-    //   reverse_bits(2*pair_idx+1) >> (32 - domain_pow)
     uint shift = 32u - domain_pow;
-    uint src_a = reverse_bits32(pair_idx * 2u)     >> shift;
+    uint src_a = reverse_bits32(pair_idx * 2u)      >> shift;
     uint src_b = reverse_bits32(pair_idx * 2u + 1u) >> shift;
 
     ulong u = src[src_a * ncols + col];
-    ulong t = src[src_b * ncols + col];  // twiddle = 1 at s=1, no mul needed
+    ulong t = src[src_b * ncols + col];
 
-    dst[(pair_idx * 2u)     * ncols + col] = gl_add(u, t);
+    dst[(pair_idx * 2u)      * ncols + col] = gl_add(u, t);
     dst[(pair_idx * 2u + 1u) * ncols + col] = gl_sub(u, t);
+}
+
+// ---- kernel: ntt_rev_butterfly_s1s2 ---------------------------------------
+// Fused even further: reads input in natural order, writes
+// (reverse permutation ∘ s=1 butterfly ∘ s=2 butterfly) in ONE pass. This is
+// an algorithmic equivalent to running ntt_reverse_permutation +
+// ntt_butterfly_phase(s=1) + ntt_butterfly_phase(s=2) — three passes collapsed
+// into one, saving two full read+write cycles.
+//
+// At s=1, twiddles are always 1 (ω_2^0). At s=2, the two butterflies per
+// group-of-4 use twiddles ω_4^0 = 1 and ω_4^1 = I (primitive 4th root of
+// unity). So the only twiddle multiplication needed in the combined kernel
+// is a single multiply-by-I per quad-butterfly.
+//
+// Requires src ≠ dst and domain_pow ≥ 2. Caller falls back to the
+// s=1-only fused kernel for domain_pow == 1 or to the legacy path for
+// in-place (src == dst).
+//
+// Dispatch: (domain_size / 4) × ncols threads. Thread tid handles one
+// (quad-butterfly, column) pair.
+kernel void ntt_rev_butterfly_s1s2(
+    device const ulong* src        [[ buffer(0) ]],
+    device       ulong* dst        [[ buffer(1) ]],
+    constant     uint&  domain_pow [[ buffer(2) ]],
+    constant     uint&  ncols      [[ buffer(3) ]],
+    constant     ulong& I_val      [[ buffer(4) ]],  // = ω_4 (primitive 4th root of unity)
+    uint tid [[ thread_position_in_grid ]]
+) {
+    uint quarter = (1u << domain_pow) >> 2;
+    uint total   = quarter * ncols;
+    if (tid >= total) return;
+
+    uint group_idx = tid / ncols;
+    uint col       = tid % ncols;
+
+    // Group of 4 at natural positions (group_idx*4 + 0..3). Source positions
+    // (before rev+butterflies) are the bit-reversed indices.
+    uint shift = 32u - domain_pow;
+    uint base_nat = group_idx * 4u;
+    uint ra = reverse_bits32(base_nat + 0u) >> shift;
+    uint rb = reverse_bits32(base_nat + 1u) >> shift;
+    uint rc = reverse_bits32(base_nat + 2u) >> shift;
+    uint rd = reverse_bits32(base_nat + 3u) >> shift;
+
+    ulong x_a = src[ra * ncols + col];
+    ulong x_b = src[rb * ncols + col];
+    ulong x_c = src[rc * ncols + col];
+    ulong x_d = src[rd * ncols + col];
+
+    // Stage s=1 (within-pair): twiddle = 1, no mul.
+    ulong y0 = gl_add(x_a, x_b);     // = rev(4g+0) + rev(4g+1)
+    ulong y1 = gl_sub(x_a, x_b);
+    ulong y2 = gl_add(x_c, x_d);
+    ulong y3 = gl_sub(x_c, x_d);
+
+    // Stage s=2: butterflies (y0, y2) with twiddle 1, (y1, y3) with twiddle I.
+    ulong yI = gl_mul(y3, I_val);
+
+    dst[(base_nat + 0u) * ncols + col] = gl_add(y0, y2);
+    dst[(base_nat + 1u) * ncols + col] = gl_add(y1, yI);
+    dst[(base_nat + 2u) * ncols + col] = gl_sub(y0, y2);
+    dst[(base_nat + 3u) * ncols + col] = gl_sub(y1, yI);
 }
 
 // ---- kernel: ntt_radix4_phase ---------------------------------------------

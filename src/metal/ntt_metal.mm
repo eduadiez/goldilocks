@@ -125,22 +125,31 @@ void NTT_Metal(Goldilocks::Element* dst,
             reinterpret_cast<const uint64_t*>(roots_raw),
             rlen);
 
-        if (dst != src && domainPow >= 1) {
-            // Alias src read-only; the fused kernel reads natural-order src
-            // and writes bit-reverse-permuted + s=1-butterflied dst in one pass.
+        if (dst != src && domainPow >= 2) {
+            // Fused rev + s=1 + s=2 in one pass (three passes collapsed).
+            // I = ω_4 = primitive 4th root of unity = roots[1 << (s_global - 2)].
             int src_is_copy = 0;
             MetalBufHandle src_buf = metal_buf_alias(ctx, (void*)src,
                                                       data_bytes, &src_is_copy);
 
-            metal_dispatch_ntt_rev_butterfly_s1(
-                ctx, src_buf, dst_buf, domainPow, ncols32);
+            uint64_t I_val = roots_raw[1ULL << (s_global - 2)].fe;
+            metal_dispatch_ntt_rev_butterfly_s1s2(
+                ctx, src_buf, dst_buf, domainPow, ncols32, I_val);
 
-            // Continue from phase s=2.
+            // Continue from phase s=3.
             metal_dispatch_ntt_butterfly_all_phases(
                 ctx, dst_buf, tw_buf,
                 ncols32, domain32,
-                /*start_s=*/2, domainPow, s_global);
+                /*start_s=*/3, domainPow, s_global);
 
+            metal_buf_release(src_buf);
+        } else if (dst != src && domainPow == 1) {
+            // Fallback to s=1-only fused kernel for N=2.
+            int src_is_copy = 0;
+            MetalBufHandle src_buf = metal_buf_alias(ctx, (void*)src,
+                                                      data_bytes, &src_is_copy);
+            metal_dispatch_ntt_rev_butterfly_s1(
+                ctx, src_buf, dst_buf, domainPow, ncols32);
             metal_buf_release(src_buf);
         } else {
             // In-place path (src == dst) or trivial N=1.

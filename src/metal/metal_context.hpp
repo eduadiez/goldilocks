@@ -210,6 +210,18 @@ void metal_dispatch_ntt_rev_butterfly_s1(MetalCtxHandle ctx,
                                           uint32_t domain_pow,
                                           uint32_t ncols);
 
+// ntt_rev_butterfly_s1s2: fuses rev-perm + s=1 + s=2 butterflies into ONE
+// pass. Saves two full read+write passes vs the unfused trio. Requires
+// src ≠ dst and domain_pow ≥ 2. I_val = primitive 4th root of unity
+// (roots[1 << (s_global - 2)] = ω_4).
+// Dispatch: (domain_size/4 * ncols) threads.
+void metal_dispatch_ntt_rev_butterfly_s1s2(MetalCtxHandle ctx,
+                                             MetalBufHandle src,
+                                             MetalBufHandle dst,
+                                             uint32_t domain_pow,
+                                             uint32_t ncols,
+                                             uint64_t I_val);
+
 // ntt_butterfly_phase: one thread per (butterfly pair, col) = domain_size/2 * ncols.
 //   buf                 = data buffer [domain_size * ncols]  (buffer(0))
 //   twiddles            = full roots array [1 << s_global]    (buffer(1))

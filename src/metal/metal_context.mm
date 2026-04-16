@@ -661,6 +661,41 @@ void metal_dispatch_ntt_reverse_permutation(MetalCtxHandle ctx,
 // ---------------------------------------------------------------------------
 // ntt_butterfly_phase dispatch
 // ---------------------------------------------------------------------------
+void metal_dispatch_ntt_rev_butterfly_s1s2(MetalCtxHandle ctx,
+                                             MetalBufHandle src,
+                                             MetalBufHandle dst,
+                                             uint32_t domain_pow,
+                                             uint32_t ncols,
+                                             uint64_t I_val) {
+    @autoreleasepool {
+        GoldilocksMetalContext* impl = get_impl(ctx);
+        id<MTLComputePipelineState> pso =
+            (__bridge id<MTLComputePipelineState>)(
+                metal_context_pipeline(ctx, "ntt_rev_butterfly_s1s2"));
+
+        uint32_t quarter = (1u << domain_pow) >> 2;
+        uint32_t total   = quarter * ncols;
+
+        id<MTLCommandBuffer>        cmd = [impl->_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(src) offset:0 atIndex:0];
+        [enc setBuffer:(__bridge id<MTLBuffer>)(dst) offset:0 atIndex:1];
+        [enc setBytes:&domain_pow length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&ncols      length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&I_val      length:sizeof(uint64_t) atIndex:4];
+
+        NSUInteger tpg    = threadgroup_size_for(pso, 64);
+        NSUInteger groups = ((NSUInteger)total + tpg - 1) / tpg;
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+    }
+}
+
 void metal_dispatch_ntt_rev_butterfly_s1(MetalCtxHandle ctx,
                                           MetalBufHandle src,
                                           MetalBufHandle dst,
