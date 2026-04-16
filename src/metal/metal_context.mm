@@ -17,6 +17,7 @@
 #include <cstdio>
 
 #include "metal_context.hpp"
+#include "goldilocks_metal.hpp"  // for get_ntt_radix_thresholds()
 
 // ---------------------------------------------------------------------------
 // Internal Obj-C class holding all Metal state
@@ -876,19 +877,13 @@ void metal_dispatch_ntt_butterfly_all_phases(MetalCtxHandle ctx,
 
         // Radix-k wins when the per-thread work is amortized across enough
         // parallel dispatches to saturate the GPU. The crossover thresholds
-        // below are empirical on Apple M4 Pro: below R4_MIN_THREADS the
-        // per-thread register footprint of r4 kills occupancy; below
-        // R8_MIN_THREADS the same applies to r8 (even more registers per
-        // thread). Above the thresholds, fewer passes + more ILP wins.
-        const uint32_t R4_MIN_THREADS = 8192;
-        // R8 per-thread register pressure is ~2× r4 (8 elements live + 7
-        // twiddles + intermediates). At small total-thread counts the GPU
-        // can't hide the occupancy drop even when data exceeds L1/L2; the
-        // crossover on M4 Pro sits near 128k threads (seen as a regression
-        // at N=2^18, ncols=1 just above the previous 32k threshold).
-        const uint32_t R8_MIN_THREADS = 131072;
-        bool use_radix4 = (quarter * ncols >= R4_MIN_THREADS);
-        bool use_radix8 = (eighth  * ncols >= R8_MIN_THREADS);
+        // are tuned manually on M4 Pro (8192 / 131072) but accept env var
+        // and disk-cache overrides via goldilocks_metal::get_ntt_radix_thresholds()
+        // so callers on different Apple Silicon variants (more / fewer GPU
+        // cores) can plug in their own numbers without recompiling.
+        auto thr = goldilocks_metal::get_ntt_radix_thresholds();
+        bool use_radix4 = (quarter * ncols >= thr.r4_min);
+        bool use_radix8 = (eighth  * ncols >= thr.r8_min);
 
         uint32_t s = start_s;
         bool first = true;
