@@ -59,5 +59,66 @@ namespace goldilocks_metal {
                                 uint64_t count,
                                 uint64_t num_cols,
                                 uint64_t num_rows);
+
+    // ----- Hybrid CPU+GPU Merkle building blocks ---------------------------
+    //
+    // merkletree_metal_leaves_only: GPU leaf hashing for a contiguous row
+    //   slice. tree_out must point to the slice start inside the caller's
+    //   full tree buffer (i.e. `tree + K*4` when this handles rows
+    //   [K, K+nrows_partial)). `input` must point to the matching row-major
+    //   input slice. Writes exactly nrows_partial × 4 elements. No parent
+    //   work performed.
+    void merkletree_metal_leaves_only(Goldilocks::Element* tree_out,
+                                      Goldilocks::Element* input,
+                                      uint64_t ncols,
+                                      uint64_t nrows_partial);
+
+    // merkletree_metal_parents_only: GPU parent-level reduction over leaves
+    //   already present at tree[0 .. nrows_total × 4). After this call the
+    //   tree buffer contains the full Merkle tree up to the root.
+    void merkletree_metal_parents_only(Goldilocks::Element* tree,
+                                       uint64_t nrows_total);
+
+    // merkletree_hybrid: CPU NEON + GPU Metal concurrent Merkle build.
+    //   Splits leaves by row: CPU handles [0, K), GPU handles [K, nrows),
+    //   where K = floor(nrows * cpu_fraction). Both run concurrently; then
+    //   the GPU performs the parent reduction over the full tree. Uses
+    //   unified memory — no host↔device copies.
+    //   Best for nrows ≤ 1M; above that the GPU's memory bandwidth share
+    //   collides with the CPU's and the win disappears (use merkletree_metal
+    //   directly at MERKLETREE_BENCH scale).
+    //   cpu_fraction ∈ [0, 1], or pass < 0 to auto-calibrate via
+    //   get_merkle_throughput_ratio().
+    //   Bit-exact with merkletree_metal / PoseidonGoldilocks::merkletree_neon
+    //   at any cpu_fraction.
+    void merkletree_hybrid(Goldilocks::Element* tree,
+                           Goldilocks::Element* input,
+                           uint64_t ncols,
+                           uint64_t nrows,
+                           double cpu_fraction);
+
+    // merkletree_hybrid_batch: tree-count split. Runs `count` independent
+    // trees, putting `n_gpu` on the GPU (via merkletree_metal_batch) and the
+    // rest on the CPU (NEON, OMP-parallel) concurrently.
+    //   Unlike merkletree_hybrid, this does NOT split a single tree — each
+    //   engine processes whole trees, so there's no boundary memory
+    //   pressure and the win scales to any tree size (no 1M-row ceiling).
+    //   cpu_fraction is the FRACTION OF TREES (not rows) to assign to
+    //   the CPU; pass < 0 to auto-calibrate from get_merkle_throughput_ratio().
+    void merkletree_hybrid_batch(Goldilocks::Element** trees,
+                                 Goldilocks::Element** inputs,
+                                 uint64_t count,
+                                 uint64_t ncols,
+                                 uint64_t nrows,
+                                 double cpu_fraction);
+
+    // get_merkle_throughput_ratio: returns a one-time-cached double R such
+    // that R = T_neon / T_metal for a representative Merkle workload
+    // (currently 128 cols × 16384 rows on the running Apple Silicon GPU).
+    //   Triggers a ~30 ms calibration the first time it's called; cheap
+    //   atomic load thereafter. Thread-safe.
+    //   Used by merkletree_hybrid* to pick the optimal split:
+    //     cpu_fraction = 1 / (1 + R)  → balances finishing times.
+    double get_merkle_throughput_ratio();
 }
 #endif

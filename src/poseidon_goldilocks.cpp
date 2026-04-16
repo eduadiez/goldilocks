@@ -710,6 +710,21 @@ void PoseidonGoldilocks::merkletree_metal(Goldilocks::Element *tree, Goldilocks:
                                           uint64_t num_cols, uint64_t num_rows) {
     goldilocks_metal::merkletree_metal(tree, input, num_cols, num_rows);
 }
+
+void PoseidonGoldilocks::merkletree_hybrid(Goldilocks::Element *tree, Goldilocks::Element *input,
+                                            uint64_t num_cols, uint64_t num_rows,
+                                            double cpu_fraction) {
+    goldilocks_metal::merkletree_hybrid(tree, input, num_cols, num_rows, cpu_fraction);
+}
+
+void PoseidonGoldilocks::merkletree_hybrid_batch(Goldilocks::Element **trees,
+                                                  Goldilocks::Element **inputs,
+                                                  uint64_t count,
+                                                  uint64_t num_cols, uint64_t num_rows,
+                                                  double cpu_fraction) {
+    goldilocks_metal::merkletree_hybrid_batch(trees, inputs, count,
+                                               num_cols, num_rows, cpu_fraction);
+}
 #endif
 
 #ifdef __AVX512__

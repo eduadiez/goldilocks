@@ -103,6 +103,37 @@ bench_lde: bench_lde.mm $(METAL_BRIDGE_SRCS) $(GL_SRC)/metal/ntt_metal.mm
 	    bench_lde.mm $(METAL_BRIDGE_SRCS) $(GL_SRC)/metal/ntt_metal.mm \
 	    $(NTT_CPU_OBJ) $(GL_LIBS) -o $@
 
+# Hybrid CPU NEON + GPU Metal Merkle dispatcher: bit-exact vs both reference
+# paths, sweeps cpu_fraction to find the optimum split empirically.
+bench_hybrid_merkle: bench_hybrid_merkle.mm $(METAL_BRIDGE_SRCS)
+	$(CXX) -std=c++17 -O3 -fobjc-arc -ObjC++ $(MTL_FRAMEWORKS) \
+	    $(GL_INC) $(OMP_FLAGS) \
+	    -DGOLDILOCKS_HAS_METAL \
+	    -DMTL_KERNEL_DIR=\"$(MTL_KERNEL_DIR)\" \
+	    bench_hybrid_merkle.mm $(METAL_BRIDGE_SRCS) $(GL_OBJ) \
+	    $(GL_LIBS) -o $@
+
+# Hybrid CPU NEON + GPU Metal NTT (memcpy column split): isolates split,
+# concurrent compute, and merge costs to show whether memcpy round-trip
+# leaves any net win over pure metal NTT.
+bench_hybrid_ntt: bench_hybrid_ntt.mm $(METAL_BRIDGE_SRCS) $(GL_SRC)/metal/ntt_metal.mm
+	$(CXX) -std=c++17 -O3 -fobjc-arc -ObjC++ $(MTL_FRAMEWORKS) \
+	    $(GL_INC) $(OMP_FLAGS) \
+	    -DGOLDILOCKS_HAS_METAL \
+	    -DMTL_KERNEL_DIR=\"$(MTL_KERNEL_DIR)\" \
+	    bench_hybrid_ntt.mm $(METAL_BRIDGE_SRCS) $(GL_SRC)/metal/ntt_metal.mm \
+	    $(NTT_CPU_OBJ) $(GL_LIBS) -o $@
+
+# Hybrid batched Merkle: tree-count split (whole trees on each engine).
+# This is the variant that scales beyond the within-tree-split 1M-row limit.
+bench_hybrid_batch: bench_hybrid_batch.mm $(METAL_BRIDGE_SRCS)
+	$(CXX) -std=c++17 -O3 -fobjc-arc -ObjC++ $(MTL_FRAMEWORKS) \
+	    $(GL_INC) $(OMP_FLAGS) \
+	    -DGOLDILOCKS_HAS_METAL \
+	    -DMTL_KERNEL_DIR=\"$(MTL_KERNEL_DIR)\" \
+	    bench_hybrid_batch.mm $(METAL_BRIDGE_SRCS) $(GL_OBJ) \
+	    $(GL_LIBS) -o $@
+
 # Leaf-kernel-only timing to separate GPU execution from host overhead.
 probe_kernel_gpu_time: probe_kernel_gpu_time.mm $(METAL_BRIDGE_SRCS)
 	$(CXX) -std=c++17 -O3 -fobjc-arc -ObjC++ $(MTL_FRAMEWORKS) \
