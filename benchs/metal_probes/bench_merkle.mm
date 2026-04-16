@@ -250,6 +250,11 @@ int main(int argc, char** argv) {
             bench_one_size(128,   (uint64_t)(1ULL << 20),   2);  // 128 cols × 1M rows   = 1 GB
             bench_one_size(256,   (uint64_t)(1ULL << 18),   2);  // 256 cols × 256k rows = 512 MB
             bench_one_size(512,   (uint64_t)(1ULL << 18),   2);  // 512 cols × 256k rows = 1 GB
+
+            // Match the official `benchs/bench.cpp` MERKLETREE_BENCH workload:
+            // FFT_SIZE = 1<<23 (8M rows), NCOLS_HASH = 128. ~8 GB input.
+            printf("\n--- benchs/bench.cpp scale: 8M rows x 128 cols (~8 GB) ---\n");
+            bench_one_size(128, (uint64_t)(1ULL << 23), 1);
         }
     }
     return 0;
