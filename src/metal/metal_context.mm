@@ -770,13 +770,15 @@ void metal_dispatch_ntt_butterfly_all_phases(MetalCtxHandle ctx,
         NSUInteger groups_r2 = ((NSUInteger)total_r2 + tpg_r2 - 1) / tpg_r2;
         NSUInteger groups_r4 = ((NSUInteger)total_r4 + tpg_r4 - 1) / tpg_r4;
 
-        // Radix-4 dispatches half the number of threads but each does ~2×
-        // the per-thread work (higher register pressure). At very small N
-        // the larger per-thread cost isn't amortized; empirically the
-        // crossover is around N = 2^15 on Apple M4 Pro. Below that, stay on
-        // the plain radix-2 butterfly.
-        const uint32_t R4_MIN_DOMAIN_POW = 15;
-        bool use_radix4 = (domain_pow >= R4_MIN_DOMAIN_POW);
+        // Radix-4 wins when the per-thread work is amortized across enough
+        // parallel dispatches to saturate the GPU. The driver criterion is
+        // the total number of radix-4 threads = (domain_size / 4) * ncols.
+        // Empirically on Apple M4 Pro the crossover is around 8192 threads
+        // total: below that the radix-2 path wins because its smaller
+        // per-thread register footprint gives higher occupancy. This covers
+        // both large-domain-small-ncols and small-domain-large-ncols shapes.
+        const uint32_t R4_MIN_THREADS = 8192;
+        bool use_radix4 = (quarter * ncols >= R4_MIN_THREADS);
 
         uint32_t s = start_s;
         bool first = true;
